@@ -1,0 +1,56 @@
+"""Training pipeline for alpha models with MLflow tracking."""
+
+import logging
+from pathlib import Path
+
+import mlflow
+import pandas as pd
+
+from python.alpha.features import compute_alpha_features, compute_forward_returns
+from python.alpha.model import CrossSectionalModel
+
+logger = logging.getLogger(__name__)
+
+FEATURE_COLS = [
+    "ret_1d", "ret_5d", "ret_10d", "ret_20d",
+    "ma_ratio_5", "ma_ratio_10", "ma_ratio_20", "ma_ratio_60",
+    "vol_5d", "vol_10d", "vol_20d",
+    "rsi_14", "macd", "macd_signal",
+    "bb_position", "volume_ratio", "hl_range", "oc_range",
+]
+
+
+def run_training(data_path: str = "data/raw/sp500_ohlcv.parquet"):
+    """Full training pipeline: load data -> features -> train -> log to MLflow."""
+    raw = pd.read_parquet(data_path)
+    featured = compute_alpha_features(raw)
+    labeled = compute_forward_returns(featured, horizon=5)
+    labeled = labeled.dropna(subset=FEATURE_COLS + ["target_5d"])
+
+    # Time-based split: last 20% for validation
+    split_idx = int(len(labeled) * 0.8)
+    train = labeled.iloc[:split_idx]
+    val = labeled.iloc[split_idx:]
+
+    with mlflow.start_run(run_name="lgbm_alpha158"):
+        model = CrossSectionalModel(model_type="lightgbm", feature_cols=FEATURE_COLS)
+        model.fit(train, target_col="target_5d")
+
+        val_preds = model.predict(val)
+        ic = pd.Series(val_preds, index=val.index).corr(val["target_5d"])
+
+        mlflow.log_params(model.params)
+        mlflow.log_metric("information_coefficient", ic)
+        mlflow.log_metric("train_size", len(train))
+        mlflow.log_metric("val_size", len(val))
+
+        importance = model.feature_importance()
+        logger.info(f"Top features:\n{importance.head(10)}")
+        logger.info(f"Validation IC: {ic:.4f}")
+
+    return model
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    run_training()
