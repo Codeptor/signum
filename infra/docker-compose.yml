@@ -1,0 +1,28 @@
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: quant
+      POSTGRES_PASSWORD: quant_dev
+      POSTGRES_DB: quant_platform
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.16.0
+    ports:
+      - "5000:5000"
+    command: mlflow server --host 0.0.0.0 --backend-store-uri sqlite:///mlflow.db --default-artifact-root /mlartifacts
+    volumes:
+      - mlflow_data:/mlartifacts
+
+volumes:
+  timescale_data:
+  mlflow_data:
