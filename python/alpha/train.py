@@ -8,6 +8,7 @@ import pandas as pd
 
 from python.alpha.features import compute_alpha_features, compute_forward_returns
 from python.alpha.model import CrossSectionalModel
+from python.data.ingestion import reshape_ohlcv_wide_to_long
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ FEATURE_COLS = [
 def run_training(data_path: str = "data/raw/sp500_ohlcv.parquet"):
     """Full training pipeline: load data -> features -> train -> log to MLflow."""
     raw = pd.read_parquet(data_path)
+    raw = reshape_ohlcv_wide_to_long(raw)
     featured = compute_alpha_features(raw)
     labeled = compute_forward_returns(featured, horizon=5)
     labeled = labeled.dropna(subset=FEATURE_COLS + ["target_5d"])

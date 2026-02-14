@@ -39,8 +39,46 @@ def fetch_fred_macro() -> pd.DataFrame:
     frames = {}
     for ticker, name in macro_tickers.items():
         data = yf.download(ticker, period=DEFAULT_PERIOD, interval=DEFAULT_INTERVAL)
-        frames[name] = data["Close"]
+        close = data["Close"]
+        # yfinance may return DataFrame instead of Series; squeeze to 1-D
+        if isinstance(close, pd.DataFrame):
+            close = close.squeeze(axis=1)
+        frames[name] = close
     return pd.DataFrame(frames)
+
+
+def reshape_ohlcv_wide_to_long(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert yfinance MultiIndex-column OHLCV to long format.
+
+    yfinance with group_by='ticker' returns columns like (AAPL, Close), (AAPL, Open), ...
+    This converts to rows with columns: [ticker, open, high, low, close, volume]
+    and a DatetimeIndex.
+    """
+    if not isinstance(df.columns, pd.MultiIndex):
+        return df  # already flat
+
+    frames = []
+    tickers = df.columns.get_level_values(0).unique()
+    for ticker in tickers:
+        ticker_df = df[ticker].copy()
+        ticker_df.columns = ticker_df.columns.str.lower()
+        ticker_df["ticker"] = ticker
+        frames.append(ticker_df)
+    return pd.concat(frames).sort_index()
+
+
+def extract_close_prices(df: pd.DataFrame) -> pd.DataFrame:
+    """Extract a simple (date x ticker) close-price matrix from yfinance output.
+
+    Returns DataFrame with DatetimeIndex and one column per ticker.
+    """
+    if isinstance(df.columns, pd.MultiIndex):
+        tickers = df.columns.get_level_values(0).unique()
+        return pd.DataFrame(
+            {t: df[(t, "Close")].values for t in tickers},
+            index=df.index,
+        )
+    return df
 
 
 def save_raw_data(df: pd.DataFrame, name: str) -> Path:

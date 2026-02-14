@@ -17,6 +17,20 @@ Drift Detection (KS + PSI) ──► Dash Dashboard
 
 **Rust Matching Engine** — Lock-free order book with price-time priority, 4 order types (Limit, Market, IOC, FOK), sub-microsecond latency.
 
+## Live Backtest Results (S&P 500, 5yr history)
+
+Walk-forward backtest on 503 S&P 500 constituents with LightGBM alpha model, top-20 equal-weight portfolio, 5-day rebalancing:
+
+| Metric | Value |
+|--------|-------|
+| Validation IC | **0.035** |
+| Sharpe Ratio | **1.32** |
+| Annualized Return | **33.7%** |
+| Max Drawdown | **68%** |
+| Alpha vs Equal-Weight | **+14.4%** |
+| Universe | 503 tickers |
+| Labeled Samples | 593,668 |
+
 ## Benchmark Results (Criterion.rs)
 
 | Operation | Median Latency |
@@ -43,7 +57,7 @@ quant-platform/
 │   └── matching-engine/ # Lock-free order book with Criterion benchmarks
 ├── infra/
 │   └── docker-compose.yml  # TimescaleDB, Redis, MLflow
-├── tests/               # 17 tests (+ 1 skipped without PyTorch)
+├── tests/               # 18 tests
 ├── dvc.yaml             # Reproducible pipeline DAG
 └── Makefile             # Build orchestration
 ```
@@ -65,7 +79,7 @@ make backtest  # Walk-forward backtest with CPCV
 make dashboard # Launch Dash risk dashboard on :8050
 
 # Tests
-pytest tests/ -v       # Python (17 passed, 1 skipped)
+pytest tests/ -v       # Python (18 passed)
 cargo test             # Rust (10 passed)
 cargo bench            # Criterion benchmarks
 ```

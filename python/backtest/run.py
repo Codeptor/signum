@@ -10,6 +10,7 @@ from python.alpha.model import CrossSectionalModel
 from python.alpha.train import FEATURE_COLS
 from python.backtest.validation import deflated_sharpe_ratio, walk_forward_split
 from python.bridge.bl_views import create_bl_views
+from python.data.ingestion import extract_close_prices
 from python.portfolio.optimizer import PortfolioOptimizer
 from python.portfolio.risk import RiskEngine
 
@@ -90,7 +91,8 @@ def run_backtest(
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    prices = pd.read_parquet("data/raw/sp500_ohlcv.parquet")
+    raw = pd.read_parquet("data/raw/sp500_ohlcv.parquet")
+    prices = extract_close_prices(raw)
     results = run_backtest(prices)
     for k, v in results.items():
         if k != "portfolio_returns":
