@@ -13,9 +13,9 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 try:
+    import lightning as pl_lightning
     import pytorch_forecasting as pf
     from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
-    import lightning as L
 
     HAS_TFT_DEPS = True
 except ImportError:
@@ -128,7 +128,7 @@ class TFTAlphaModel:
             reduce_on_plateau_patience=4,
         )
 
-        trainer = L.Trainer(
+        trainer = pl_lightning.Trainer(
             max_epochs=max_epochs,
             accelerator="auto",
             enable_progress_bar=True,

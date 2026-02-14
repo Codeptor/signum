@@ -1,6 +1,6 @@
 import pandas as pd
-import pytest
-from python.data.ingestion import fetch_sp500_tickers, fetch_ohlcv
+
+from python.data.ingestion import fetch_ohlcv, fetch_sp500_tickers
 
 
 def test_fetch_sp500_tickers_returns_list():

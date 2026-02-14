@@ -47,27 +47,27 @@ class CrossSectionalModel:
 
     def fit(self, df: pd.DataFrame, target_col: str = "target_5d") -> None:
         """Train on labeled cross-sectional data."""
-        X = df[self.feature_cols].values
+        features = df[self.feature_cols].values
         y = df[target_col].values
 
-        mask = ~np.isnan(y) & ~np.any(np.isnan(X), axis=1)
-        X, y = X[mask], y[mask]
+        mask = ~np.isnan(y) & ~np.any(np.isnan(features), axis=1)
+        features, y = features[mask], y[mask]
 
         if self.model_type == "lightgbm":
             self.model = lgb.LGBMRegressor(**self.params)
-            self.model.fit(X, y)
+            self.model.fit(features, y)
         elif self.model_type == "catboost":
             from catboost import CatBoostRegressor
 
             self.model = CatBoostRegressor(**self.params)
-            self.model.fit(X, y)
+            self.model.fit(features, y)
 
         logger.info(f"Trained {self.model_type} on {len(y)} samples")
 
     def predict(self, df: pd.DataFrame) -> np.ndarray:
         """Predict raw scores."""
-        X = df[self.feature_cols].values
-        return self.model.predict(X).astype(np.float64)
+        features = df[self.feature_cols].values
+        return self.model.predict(features).astype(np.float64)
 
     def predict_ranks(self, df: pd.DataFrame) -> pd.Series:
         """Predict and rank within each date cross-section (0=worst, 1=best)."""

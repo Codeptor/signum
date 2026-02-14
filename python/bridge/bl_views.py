@@ -44,8 +44,8 @@ def create_picking_matrix(
     """
     n_views = len(views)
     n_assets = len(tickers)
-    P = np.zeros((n_views, n_assets))
+    picking = np.zeros((n_views, n_assets))
     for i, ticker in enumerate(views.index):
         j = tickers.index(ticker)
-        P[i, j] = 1.0
-    return P
+        picking[i, j] = 1.0
+    return picking

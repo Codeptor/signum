@@ -3,11 +3,10 @@
 import logging
 
 import dash
-from dash import dcc, html, Input, Output
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+from dash import dcc, html
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +89,9 @@ def _kpi_card(label: str, value: str) -> html.Div:
 
 def _cumulative_returns_chart(cumulative: pd.Series) -> go.Figure:
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=cumulative.index, y=cumulative.values, mode="lines", name="Portfolio"))
+    fig.add_trace(go.Scatter(
+        x=cumulative.index, y=cumulative.values, mode="lines", name="Portfolio",
+    ))
     fig.update_layout(title="Cumulative Returns", xaxis_title="Date", yaxis_title="Growth of $1")
     return fig
 
@@ -121,7 +122,9 @@ def _drawdown_chart(drawdown: pd.Series) -> go.Figure:
 
 def _rolling_sharpe_chart(rolling_sharpe: pd.Series) -> go.Figure:
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=rolling_sharpe.index, y=rolling_sharpe.values, mode="lines", name="Sharpe"))
+    fig.add_trace(go.Scatter(
+        x=rolling_sharpe.index, y=rolling_sharpe.values, mode="lines", name="Sharpe",
+    ))
     fig.add_hline(y=0, line_dash="dash", line_color="gray")
     fig.update_layout(title="Rolling Sharpe Ratio (60d)", xaxis_title="Date", yaxis_title="Sharpe")
     return fig

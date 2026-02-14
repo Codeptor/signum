@@ -9,10 +9,7 @@ from python.alpha.features import compute_alpha_features, compute_forward_return
 from python.alpha.model import CrossSectionalModel
 from python.alpha.train import FEATURE_COLS
 from python.backtest.validation import deflated_sharpe_ratio, walk_forward_split
-from python.bridge.bl_views import create_bl_views
 from python.data.ingestion import extract_close_prices
-from python.portfolio.optimizer import PortfolioOptimizer
-from python.portfolio.risk import RiskEngine
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +80,13 @@ def run_backtest(
         "annualized_return": ann_return,
         "annualized_volatility": ann_vol,
         "sharpe_ratio": sharpe,
-        "max_drawdown": ((1 + portfolio_returns).cumprod().cummax() - (1 + portfolio_returns).cumprod()).max(),
-        "deflated_sharpe": deflated_sharpe_ratio(sharpe, n_trials=n_splits, n_observations=len(portfolio_returns)),
+        "max_drawdown": (
+            (1 + portfolio_returns).cumprod().cummax()
+            - (1 + portfolio_returns).cumprod()
+        ).max(),
+        "deflated_sharpe": deflated_sharpe_ratio(
+            sharpe, n_trials=n_splits, n_observations=len(portfolio_returns)
+        ),
         "n_folds": n_splits,
     }
 

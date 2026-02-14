@@ -1,6 +1,5 @@
-import numpy as np
 import pandas as pd
-import pytest
+
 from python.backtest.validation import walk_forward_split
 
 

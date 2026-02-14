@@ -5,7 +5,7 @@ import pytest
 # Skip all tests if pytorch-forecasting is not installed
 pf = pytest.importorskip("pytorch_forecasting")
 
-from python.alpha.tft_model import TFTAlphaModel
+from python.alpha.tft_model import TFTAlphaModel  # noqa: E402
 
 
 @pytest.fixture

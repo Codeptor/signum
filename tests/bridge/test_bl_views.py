@@ -1,6 +1,5 @@
-import numpy as np
 import pandas as pd
-import pytest
+
 from python.bridge.bl_views import create_bl_views
 
 

@@ -1,7 +1,6 @@
 """Training pipeline for alpha models with MLflow tracking."""
 
 import logging
-from pathlib import Path
 
 import mlflow
 import pandas as pd

@@ -2,7 +2,6 @@
 
 import logging
 
-import numpy as np
 import pandas as pd
 from skfolio import RiskMeasure
 from skfolio.optimization import HierarchicalRiskParity, MeanRisk
