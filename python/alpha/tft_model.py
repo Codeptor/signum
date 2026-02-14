@@ -71,12 +71,17 @@ class TFTAlphaModel:
             (train_dataloader, val_dataloader)
         """
         data = df.copy()
-        data["time_idx"] = (data.index - data.index.min()).days
         data["ticker"] = data["ticker"].astype(str)
+
+        # Create sequential integer time index per ticker (avoids gaps from weekends)
+        data["time_idx"] = data.groupby("ticker").cumcount()
 
         # Fill NaN in features
         for col in self.feature_cols + [self.target_col]:
             data[col] = data[col].fillna(0.0)
+
+        # pytorch-forecasting requires a unique index
+        data = data.reset_index(drop=True)
 
         # Split by time
         max_time = data["time_idx"].max()
