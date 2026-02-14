@@ -13,7 +13,8 @@ logger = logging.getLogger(__name__)
 
 def fetch_sp500_tickers() -> list[str]:
     """Fetch current S&P 500 constituent tickers from Wikipedia."""
-    table = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    table = pd.read_html(url, storage_options={"User-Agent": "quant-platform/0.1"})[0]
     return sorted(table["Symbol"].str.replace(".", "-", regex=False).tolist())
 
 
