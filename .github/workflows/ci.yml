@@ -35,7 +35,7 @@ jobs:
         run: ruff check python/ tests/
 
       - name: Run tests
-        run: pytest tests/ -v
+        run: pytest tests/ -v -m "not network"
 
   rust-tests:
     runs-on: ubuntu-latest

@@ -10,6 +10,7 @@ dependencies = [
     "lightgbm>=4.0",
     "catboost>=1.2",
     "yfinance>=0.2",
+    "lxml>=4.9",
     "sqlalchemy>=2.0",
     "psycopg2-binary>=2.9",
     "redis>=5.0",
@@ -59,3 +60,4 @@ select = ["E", "F", "I", "N", "W"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = ["network: tests that require network access"]
