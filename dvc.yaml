@@ -1,0 +1,30 @@
+stages:
+  ingest:
+    cmd: python -m python.data.ingestion
+    deps:
+      - python/data/ingestion.py
+    outs:
+      - data/raw/sp500_ohlcv.parquet
+      - data/raw/macro_indicators.parquet
+
+  train_lgbm:
+    cmd: python -m python.alpha.train
+    deps:
+      - python/alpha/train.py
+      - python/alpha/model.py
+      - python/alpha/features.py
+      - data/raw/sp500_ohlcv.parquet
+    metrics:
+      - metrics/lgbm_metrics.json:
+          cache: false
+
+  backtest:
+    cmd: python -m python.backtest.run
+    deps:
+      - python/backtest/run.py
+      - python/alpha/model.py
+      - python/portfolio/optimizer.py
+      - data/raw/sp500_ohlcv.parquet
+    metrics:
+      - metrics/backtest_metrics.json:
+          cache: false
