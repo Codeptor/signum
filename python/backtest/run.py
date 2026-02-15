@@ -1,6 +1,8 @@
 """Full backtesting pipeline: train -> predict -> allocate -> evaluate."""
 
+import json
 import logging
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -12,6 +14,8 @@ from python.backtest.validation import deflated_sharpe_ratio, walk_forward_split
 from python.data.ingestion import extract_close_prices
 
 logger = logging.getLogger(__name__)
+
+RESULTS_DIR = Path("data/processed")
 
 
 def run_backtest(
@@ -42,6 +46,7 @@ def run_backtest(
     labeled = labeled.dropna(subset=FEATURE_COLS + [f"target_{rebalance_days}d"])
 
     all_returns = []
+    latest_top_tickers = []
 
     for fold, (train_idx, test_idx) in enumerate(
         walk_forward_split(labeled, n_splits=n_splits)
@@ -65,6 +70,7 @@ def run_backtest(
             top = group.nlargest(top_n, "pred_rank")
             ret = top[f"target_{rebalance_days}d"].mean()
             fold_returns.append({"date": date, "return": ret})
+            latest_top_tickers = top["ticker"].tolist()
 
         all_returns.extend(fold_returns)
 
@@ -75,8 +81,12 @@ def run_backtest(
     ann_vol = portfolio_returns.std() * np.sqrt(252 / rebalance_days)
     sharpe = ann_return / ann_vol if ann_vol > 0 else 0
 
+    # Equal-weight allocation across latest top-N holdings
+    weights = pd.Series(1.0 / top_n, index=latest_top_tickers)
+
     return {
         "portfolio_returns": portfolio_returns,
+        "weights": weights,
         "annualized_return": ann_return,
         "annualized_volatility": ann_vol,
         "sharpe_ratio": sharpe,
@@ -91,11 +101,31 @@ def run_backtest(
     }
 
 
+def save_results(results: dict, output_dir: Path = RESULTS_DIR) -> None:
+    """Persist backtest results to disk for the dashboard."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    results["portfolio_returns"].to_frame("return").to_parquet(
+        output_dir / "backtest_returns.parquet"
+    )
+    results["weights"].to_json(output_dir / "backtest_weights.json")
+
+    metrics = {
+        k: float(v) for k, v in results.items()
+        if k not in ("portfolio_returns", "weights")
+    }
+    with open(output_dir / "backtest_metrics.json", "w") as f:
+        json.dump(metrics, f, indent=2)
+
+    logger.info(f"Saved backtest results to {output_dir}")
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     raw = pd.read_parquet("data/raw/sp500_ohlcv.parquet")
     prices = extract_close_prices(raw)
     results = run_backtest(prices)
+    save_results(results)
     for k, v in results.items():
-        if k != "portfolio_returns":
+        if k not in ("portfolio_returns", "weights"):
             logger.info(f"{k}: {v}")

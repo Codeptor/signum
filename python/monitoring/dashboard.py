@@ -130,20 +130,56 @@ def _rolling_sharpe_chart(rolling_sharpe: pd.Series) -> go.Figure:
     return fig
 
 
-if __name__ == "__main__":
-    # Demo with synthetic data
-    np.random.seed(42)
-    dates = pd.date_range("2023-01-01", periods=252, freq="B")
-    returns = pd.Series(np.random.randn(252) * 0.01, index=dates)
-    weights = pd.Series({"AAPL": 0.3, "MSFT": 0.25, "GOOG": 0.2, "AMZN": 0.15, "META": 0.1})
-    risk = {
-        "sharpe": 1.2,
-        "max_drawdown": -0.15,
-        "annualized_return": 0.12,
-        "var_95_historical": -0.018,
-        "cvar_95": -0.025,
-    }
-    rolling = returns.rolling(60).mean() / returns.rolling(60).std() * np.sqrt(252)
+def _load_backtest_results():
+    """Load persisted backtest results from data/processed/."""
+    from pathlib import Path
 
-    app = create_dashboard(returns, weights, risk, rolling)
+    results_dir = Path("data/processed")
+    returns_path = results_dir / "backtest_returns.parquet"
+
+    if not returns_path.exists():
+        logger.warning("No backtest results found. Run 'make backtest' first. Using demo data.")
+        return None
+
+    returns_df = pd.read_parquet(returns_path)
+    portfolio_returns = returns_df["return"]
+
+    weights = pd.read_json(results_dir / "backtest_weights.json", typ="series")
+
+    from python.portfolio.risk import RiskEngine
+
+    # RiskEngine expects (returns DataFrame, weights) — build single-asset returns for portfolio
+    returns_matrix = pd.DataFrame({"portfolio": portfolio_returns})
+    engine = RiskEngine(returns_matrix, pd.Series({"portfolio": 1.0}))
+    risk_summary = engine.summary()
+    rolling_sharpe = engine.rolling_sharpe(window=60)
+
+    return portfolio_returns, weights, risk_summary, rolling_sharpe
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+
+    result = _load_backtest_results()
+    if result is not None:
+        portfolio_returns, weights, risk_summary, rolling_sharpe = result
+    else:
+        # Fallback to synthetic demo data
+        np.random.seed(42)
+        dates = pd.date_range("2023-01-01", periods=252, freq="B")
+        portfolio_returns = pd.Series(np.random.randn(252) * 0.01, index=dates)
+        weights = pd.Series(
+            {"AAPL": 0.3, "MSFT": 0.25, "GOOG": 0.2, "AMZN": 0.15, "META": 0.1}
+        )
+        risk_summary = {
+            "sharpe": 1.2, "max_drawdown": -0.15, "annualized_return": 0.12,
+            "var_95_historical": -0.018, "cvar_95": -0.025,
+        }
+        rolling_sharpe = (
+            portfolio_returns.rolling(60).mean()
+            / portfolio_returns.rolling(60).std()
+            * np.sqrt(252)
+        )
+
+    app = create_dashboard(portfolio_returns, weights, risk_summary, rolling_sharpe)
     app.run(debug=True, port=8050)
