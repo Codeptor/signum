@@ -21,17 +21,17 @@ Drift Detection (KS + PSI) ──► Dash Dashboard
 
 ## Live Backtest Results (S&P 500, 5yr history)
 
-Walk-forward backtest on 503 S&P 500 constituents with LightGBM alpha model, top-20 equal-weight portfolio, 5-day rebalancing:
+Walk-forward backtest on 503 S&P 500 constituents, LightGBM alpha (21 features), top-20 portfolio, 5-day rebalancing, 10 bps transaction costs, 15% max position weight:
 
-| Metric | Value |
-|--------|-------|
-| Validation IC | **0.035** |
-| Sharpe Ratio | **1.32** |
-| Annualized Return | **33.7%** |
-| Max Drawdown | **68%** |
-| Alpha vs Equal-Weight | **+14.4%** |
-| Universe | 503 tickers |
-| Labeled Samples | 593,668 |
+| Optimizer | Sharpe (net) | Sharpe (gross) | Ann. Return | Max DD | Avg Turnover |
+|-----------|-------------|----------------|-------------|--------|-------------|
+| Equal Weight | **1.10** | 1.23 | 21.5% | 52.5% | 51% |
+| HRP | 0.63 | 0.81 | 9.8% | 55.6% | 56% |
+| Risk Parity | 0.63 | 0.81 | 9.8% | 55.6% | 56% |
+| Black-Litterman | 0.36 | 0.59 | 5.3% | 58.8% | 67% |
+| Min CVaR | 0.36 | 0.59 | 5.3% | 58.8% | 67% |
+
+Alpha is concentrated in ML stock selection — equal-weight top-20 achieves the strongest risk-adjusted returns, consistent with the "1/N puzzle" in portfolio theory (DeMiguel et al., 2009). HRP provides the best risk-managed allocation among optimization methods.
 
 ## Benchmark Results (Criterion.rs)
 
@@ -89,7 +89,7 @@ cargo bench            # Criterion benchmarks
 ## Key Components
 
 ### ML Alpha Generation
-- **LightGBM/CatBoost** cross-sectional model with 18 Alpha158-inspired features
+- **LightGBM/CatBoost** cross-sectional model with 21 Alpha158-inspired features (incl. liquidity)
 - **Temporal Fusion Transformer** wrapper (requires `pip install 'quant-platform[ml]'`)
 - MLflow experiment tracking with IC, Rank IC metrics
 
@@ -114,11 +114,14 @@ cargo bench            # Criterion benchmarks
 ### Backtesting
 - Walk-forward cross-validation with embargo period
 - Deflated Sharpe Ratio (Bailey & Lopez de Prado, 2014)
-- Transaction cost-adjusted framework
+- Transaction cost model (turnover-based, configurable bps)
+- Position limits (max weight constraint)
+- Turnover dampening (weight blending)
+- Multi-strategy comparison
 
 ### Monitoring
 - Feature drift detection (KS test + Population Stability Index)
-- Dash dashboard: KPI cards, cumulative returns, drawdown, rolling Sharpe, weight treemap
+- Dash dashboard: KPI cards, cumulative returns, drawdown, rolling Sharpe, turnover, concentration gauge
 
 ## Tech Stack
 

@@ -64,6 +64,12 @@ def _compute_single_ticker(df: pd.DataFrame) -> pd.DataFrame:
     df["volume_ma_10"] = v.rolling(10).mean()
     df["volume_ratio"] = v / v.rolling(10).mean()
 
+    # Liquidity features
+    dollar_vol = c * v
+    df["dollar_volume_20d"] = dollar_vol.rolling(20).mean()
+    df["amihud_illiq"] = (c.pct_change().abs() / dollar_vol.replace(0, np.nan)).rolling(20).mean()
+    df["bid_ask_proxy"] = (h - lo) / c  # Corwin-Schultz spread proxy
+
     # High-low range
     df["hl_range"] = (h - lo) / c
     df["oc_range"] = (c - o) / c

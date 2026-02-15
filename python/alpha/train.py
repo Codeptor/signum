@@ -17,6 +17,7 @@ FEATURE_COLS = [
     "vol_5d", "vol_10d", "vol_20d",
     "rsi_14", "macd", "macd_signal",
     "bb_position", "volume_ratio", "hl_range", "oc_range",
+    "dollar_volume_20d", "amihud_illiq", "bid_ask_proxy",
 ]
 
 

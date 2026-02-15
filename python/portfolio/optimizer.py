@@ -50,9 +50,18 @@ class PortfolioOptimizer:
             Mapping of ticker to confidence level between 0 and 1
             (Idzorek's method).
         """
-        # Build string-based view expressions for skfolio's BlackLitterman API
+        # Sanitize ticker names: skfolio's BL parser treats hyphens as
+        # subtraction and chokes on scientific notation in view strings.
+        sanitize = {t: t.replace("-", "_") for t in self.tickers if "-" in t}
+        if sanitize:
+            returns = self.returns.rename(columns=sanitize)
+        else:
+            returns = self.returns
+        safe_tickers = [sanitize.get(t, t) for t in self.tickers]
+
         view_strings = [
-            f"{ticker} = {ret}" for ticker, ret in views.items()
+            f"{sanitize.get(ticker, ticker)} = {ret:.10f}"
+            for ticker, ret in views.items()
         ]
         confidence_array = [view_confidences[ticker] for ticker in views.index]
 
@@ -67,8 +76,11 @@ class PortfolioOptimizer:
             prior_estimator=prior_model,
             min_weights=0.0,
         )
-        model.fit(self.returns)
-        return pd.Series(model.weights_, index=self.tickers, name="bl_weights")
+        model.fit(returns)
+        # Map sanitized names back to original tickers
+        unsanitize = {v: k for k, v in sanitize.items()}
+        original_tickers = [unsanitize.get(t, t) for t in safe_tickers]
+        return pd.Series(model.weights_, index=original_tickers, name="bl_weights")
 
     def risk_parity(self) -> pd.Series:
         """Equal risk contribution allocation via HRP with variance risk measure."""
