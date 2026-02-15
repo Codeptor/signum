@@ -1,4 +1,6 @@
-# Quantitative Equity Platform
+# Signum
+
+[![CI](https://github.com/Codeptor/signum/actions/workflows/ci.yml/badge.svg)](https://github.com/Codeptor/signum/actions/workflows/ci.yml)
 
 End-to-end quantitative equity platform: ML alpha generation, portfolio optimization, and a Rust matching engine.
 

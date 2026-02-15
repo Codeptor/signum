@@ -12,8 +12,6 @@ dependencies = [
     "yfinance>=0.2",
     "lxml>=4.9",
     "sqlalchemy>=2.0",
-    "psycopg2-binary>=2.9",
-    "redis>=5.0",
     "mlflow>=2.10",
     "plotly>=5.18",
     "dash>=2.14",
@@ -35,12 +33,16 @@ monitoring = [
     "evidently>=0.4",
     "shap>=0.43",
 ]
+infra = [
+    "psycopg2-binary>=2.9",
+    "redis>=5.0",
+]
 dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
     "ruff>=0.3",
 ]
-all = ["quant-platform[ml,portfolio,monitoring,dev]"]
+all = ["quant-platform[ml,portfolio,monitoring,infra,dev]"]
 
 [build-system]
 requires = ["setuptools>=68"]
