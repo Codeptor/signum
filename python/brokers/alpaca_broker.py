@@ -2,13 +2,11 @@
 
 import logging
 import os
-from datetime import datetime
 from typing import Dict, List, Optional
 
 from python.brokers.base import (
     BaseBroker,
     BrokerAccount,
-    BrokerFill,
     BrokerOrder,
     BrokerPosition,
 )
@@ -205,7 +203,7 @@ class AlpacaBroker(BaseBroker):
                 unrealized_pl=float(position.unrealized_pl),
                 unrealized_plpc=float(position.unrealized_plpc),
             )
-        except Exception as e:
+        except Exception:
             # Position might not exist
             return None
 

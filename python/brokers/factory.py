@@ -1,7 +1,7 @@
 """Broker factory for creating broker instances."""
 
 import logging
-from typing import Dict, Optional, Type
+from typing import Dict, Type
 
 from python.brokers.base import BaseBroker
 
