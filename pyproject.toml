@@ -29,6 +29,9 @@ portfolio = [
     "cvxpy>=1.4",
     "riskfolio-lib>=6.0",
 ]
+broker = [
+    "alpaca-trade-api>=3.0",
+]
 monitoring = [
     "evidently>=0.4",
     "shap>=0.43",
@@ -42,7 +45,7 @@ dev = [
     "pytest-cov>=4.1",
     "ruff>=0.3",
 ]
-all = ["quant-platform[ml,portfolio,monitoring,infra,dev]"]
+all = ["quant-platform[ml,portfolio,broker,monitoring,infra,dev]"]
 
 [build-system]
 requires = ["setuptools>=68"]
