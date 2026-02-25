@@ -9,3 +9,19 @@ target/
 data/raw/
 data/processed/
 mlruns/
+
+# IDE and editor files
+.serena/
+
+# Agent/skill configuration (user-specific)
+.agent/
+.agents/
+.claude/
+.cline/
+.factory/
+skills/
+extensions.txt
+skills-lock.json
+
+# Documentation plans (keep local)
+docs/plans/
