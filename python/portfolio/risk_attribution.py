@@ -1,6 +1,6 @@
 """Risk attribution: decomposition, marginal contribution, and risk parity."""
 
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd

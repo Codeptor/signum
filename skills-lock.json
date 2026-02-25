@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "skills": {
+    "backtesting-frameworks": {
+      "source": "wshobson/agents",
+      "sourceType": "github",
+      "computedHash": "d6891f66bce9315628d7fb559cc04dabaa120d172e71d20ecd4093a580c75a80"
+    },
+    "portfolio-optimization": {
+      "source": "letta-ai/skills",
+      "sourceType": "github",
+      "computedHash": "2d0aa283279ae29b30862f2b53f95362aea785de33a3aaff05edab44a84b50fc"
+    },
+    "quant-analyst": {
+      "source": "404kidwiz/claude-supercode-skills",
+      "sourceType": "github",
+      "computedHash": "99ada7f2ca8d29ba2c74ef7a5e82383a5a9c0797eda657a4c85200b947b58d8a"
+    },
+    "risk-metrics-calculation": {
+      "source": "wshobson/agents",
+      "sourceType": "github",
+      "computedHash": "bc2eab9147752e9933fe3ed5c26b1b00b3bf8614c1567b570c8b94e57d7b95f5"
+    }
+  }
+}
