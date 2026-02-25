@@ -111,6 +111,6 @@ def test_full_pipeline(synthetic_universe, mock_macro_file):
     returns = prices.pct_change().dropna()
     engine = RiskEngine(returns, hrp_weights)
     summary = engine.summary()
-    assert "sharpe" in summary
+    assert "sharpe_ratio" in summary
     assert "max_drawdown" in summary
     assert summary["max_drawdown"] <= 0
