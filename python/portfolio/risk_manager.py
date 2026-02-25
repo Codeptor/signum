@@ -73,8 +73,8 @@ class RiskManager:
         self.risk_free_rate = risk_free_rate
 
         # Tracking
-        self.daily_trades: Dict[str, int] = field(default_factory=dict)
-        self.daily_turnover: Dict[str, float] = field(default_factory=dict)
+        self.daily_trades: Dict[str, int] = {}
+        self.daily_turnover: Dict[str, float] = {}
         self.risk_engine: Optional[RiskEngine] = None
         self.current_weights: Optional[pd.Series] = None
 
@@ -328,6 +328,10 @@ class RiskManager:
     ):
         """Record a trade for daily limit tracking."""
         date_key = current_date or pd.Timestamp.now().strftime("%Y-%m-%d")
+
+        # Skip small weight changes (dust trades)
+        if abs(weight_change) < 0.001:
+            return
 
         # Update trade count
         self.daily_trades[date_key] = self.daily_trades.get(date_key, 0) + 1
