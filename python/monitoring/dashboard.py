@@ -22,6 +22,8 @@ def create_dashboard(
     rolling_sharpe: pd.Series,
     turnover: pd.Series | None = None,
     metrics: dict | None = None,
+    risk_contributions: dict | None = None,
+    rolling_var: pd.Series | None = None,
 ) -> dash.Dash:
     """Create and return a Dash app for risk monitoring."""
     app = dash.Dash(__name__)
@@ -31,11 +33,16 @@ def create_dashboard(
 
     # Build KPI cards
     kpi_cards = [
-        _kpi_card("Sharpe", f"{risk_summary.get('sharpe', 0):.2f}"),
+        _kpi_card(
+            "Sharpe", f"{risk_summary.get('sharpe_ratio', risk_summary.get('sharpe', 0)):.2f}"
+        ),
+        _kpi_card("Sortino", f"{risk_summary.get('sortino_ratio', 0):.2f}"),
+        _kpi_card("Calmar", f"{risk_summary.get('calmar_ratio', 0):.2f}"),
         _kpi_card("Max DD", f"{risk_summary.get('max_drawdown', 0):.1%}"),
         _kpi_card("Ann. Return", f"{risk_summary.get('annualized_return', 0):.1%}"),
-        _kpi_card("VaR (95%)", f"{risk_summary.get('var_95_historical', 0):.4f}"),
-        _kpi_card("CVaR (95%)", f"{risk_summary.get('cvar_95', 0):.4f}"),
+        _kpi_card("VaR (95%)", f"{risk_summary.get('var_95_historical', 0):.1%}"),
+        _kpi_card("CVaR (95%)", f"{risk_summary.get('cvar_95', 0):.1%}"),
+        _kpi_card("Omega", f"{risk_summary.get('omega_ratio', 0):.2f}"),
     ]
     if metrics:
         if "avg_turnover" in metrics:
@@ -68,13 +75,25 @@ def create_dashboard(
         ]
         rows.append(html.Div(row3, style={"display": "flex", "gap": "20px"}))
 
+    # Add risk attribution chart if available
+    if risk_contributions is not None:
+        row4 = [
+            dcc.Graph(figure=_risk_attribution_chart(risk_contributions), style={"flex": "1"}),
+        ]
+        # Add rolling VaR if available
+        if rolling_var is not None:
+            row4.append(dcc.Graph(figure=_rolling_var_chart(rolling_var), style={"flex": "1"}))
+        rows.append(html.Div(row4, style={"display": "flex", "gap": "20px"}))
+
     app.layout = html.Div(
         [
             html.H1("Signum — Risk Dashboard"),
             html.Div(
                 kpi_cards,
                 style={
-                    "display": "flex", "gap": "15px", "marginBottom": "30px",
+                    "display": "flex",
+                    "gap": "15px",
+                    "marginBottom": "30px",
                     "flexWrap": "wrap",
                 },
             ),
@@ -103,11 +122,18 @@ def _kpi_card(label: str, value: str) -> html.Div:
 
 def _cumulative_returns_chart(cumulative: pd.Series) -> go.Figure:
     fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=cumulative.index, y=cumulative.values, mode="lines", name="Portfolio",
-    ))
+    fig.add_trace(
+        go.Scatter(
+            x=cumulative.index,
+            y=cumulative.values,
+            mode="lines",
+            name="Portfolio",
+        )
+    )
     fig.update_layout(
-        title="Cumulative Returns", xaxis_title="Date", yaxis_title="Growth of $1",
+        title="Cumulative Returns",
+        xaxis_title="Date",
+        yaxis_title="Growth of $1",
     )
     return fig
 
@@ -124,8 +150,11 @@ def _drawdown_chart(drawdown: pd.Series) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
-            x=drawdown.index, y=drawdown.values,
-            fill="tozeroy", mode="lines", name="Drawdown",
+            x=drawdown.index,
+            y=drawdown.values,
+            fill="tozeroy",
+            mode="lines",
+            name="Drawdown",
             line={"color": "red"},
         )
     )
@@ -135,12 +164,19 @@ def _drawdown_chart(drawdown: pd.Series) -> go.Figure:
 
 def _rolling_sharpe_chart(rolling_sharpe: pd.Series) -> go.Figure:
     fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=rolling_sharpe.index, y=rolling_sharpe.values, mode="lines", name="Sharpe",
-    ))
+    fig.add_trace(
+        go.Scatter(
+            x=rolling_sharpe.index,
+            y=rolling_sharpe.values,
+            mode="lines",
+            name="Sharpe",
+        )
+    )
     fig.add_hline(y=0, line_dash="dash", line_color="gray")
     fig.update_layout(
-        title="Rolling Sharpe Ratio (60d)", xaxis_title="Date", yaxis_title="Sharpe",
+        title="Rolling Sharpe Ratio (60d)",
+        xaxis_title="Date",
+        yaxis_title="Sharpe",
     )
     return fig
 
@@ -149,42 +185,75 @@ def _turnover_chart(turnover: pd.Series) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(go.Bar(x=turnover.index, y=turnover.values, name="Turnover"))
     avg = turnover.mean()
-    fig.add_hline(y=avg, line_dash="dash", line_color="orange",
-                  annotation_text=f"avg={avg:.1%}")
+    fig.add_hline(y=avg, line_dash="dash", line_color="orange", annotation_text=f"avg={avg:.1%}")
     fig.update_layout(
         title="Portfolio Turnover per Rebalance",
-        xaxis_title="Date", yaxis_title="Turnover (fraction)",
+        xaxis_title="Date",
+        yaxis_title="Turnover (fraction)",
     )
     return fig
 
 
 def _hhi_chart(weights: pd.Series) -> go.Figure:
     """Show position concentration metrics."""
-    hhi = (weights ** 2).sum()
+    hhi = (weights**2).sum()
     eff_n = 1.0 / hhi if hhi > 0 else 0
     equal_weight = 1.0 / len(weights) if len(weights) > 0 else 0
 
     fig = go.Figure()
-    fig.add_trace(go.Indicator(
-        mode="gauge+number",
-        value=eff_n,
-        title={"text": "Effective # of Bets"},
-        gauge={
-            "axis": {"range": [0, len(weights)]},
-            "bar": {"color": "darkblue"},
-            "steps": [
-                {"range": [0, len(weights) * 0.3], "color": "red"},
-                {"range": [len(weights) * 0.3, len(weights) * 0.7], "color": "yellow"},
-                {"range": [len(weights) * 0.7, len(weights)], "color": "green"},
-            ],
-            "threshold": {
-                "line": {"color": "black", "width": 2},
-                "thickness": 0.75,
-                "value": 1.0 / equal_weight if equal_weight > 0 else 0,
+    fig.add_trace(
+        go.Indicator(
+            mode="gauge+number",
+            value=eff_n,
+            title={"text": "Effective # of Bets"},
+            gauge={
+                "axis": {"range": [0, len(weights)]},
+                "bar": {"color": "darkblue"},
+                "steps": [
+                    {"range": [0, len(weights) * 0.3], "color": "red"},
+                    {"range": [len(weights) * 0.3, len(weights) * 0.7], "color": "yellow"},
+                    {"range": [len(weights) * 0.7, len(weights)], "color": "green"},
+                ],
+                "threshold": {
+                    "line": {"color": "black", "width": 2},
+                    "thickness": 0.75,
+                    "value": 1.0 / equal_weight if equal_weight > 0 else 0,
+                },
             },
-        },
-    ))
+        )
+    )
     fig.update_layout(height=300)
+    return fig
+
+
+def _risk_attribution_chart(risk_contributions: dict) -> go.Figure:
+    """Show risk contribution by asset as pie chart."""
+    tickers = list(risk_contributions.keys())
+    contributions = list(risk_contributions.values())
+
+    fig = go.Figure(data=[go.Pie(labels=tickers, values=contributions, hole=0.4)])
+    fig.update_layout(title="Risk Contribution by Asset", height=350)
+    return fig
+
+
+def _rolling_var_chart(rolling_var: pd.Series) -> go.Figure:
+    """Show rolling VaR chart."""
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=rolling_var.index,
+            y=rolling_var.values * 100,  # Convert to %
+            mode="lines",
+            name="VaR (95%)",
+            fill="tozeroy",
+            line={"color": "red"},
+        )
+    )
+    fig.update_layout(
+        title="Rolling VaR (95%, 63d)",
+        xaxis_title="Date",
+        yaxis_title="VaR (%)",
+    )
     return fig
 
 
@@ -236,12 +305,13 @@ if __name__ == "__main__":
         np.random.seed(42)
         dates = pd.date_range("2023-01-01", periods=252, freq="B")
         returns = pd.Series(np.random.randn(252) * 0.01, index=dates)
-        weights = pd.Series(
-            {"AAPL": 0.3, "MSFT": 0.25, "GOOG": 0.2, "AMZN": 0.15, "META": 0.1}
-        )
+        weights = pd.Series({"AAPL": 0.3, "MSFT": 0.25, "GOOG": 0.2, "AMZN": 0.15, "META": 0.1})
         risk = {
-            "sharpe": 1.2, "max_drawdown": -0.15, "annualized_return": 0.12,
-            "var_95_historical": -0.018, "cvar_95": -0.025,
+            "sharpe": 1.2,
+            "max_drawdown": -0.15,
+            "annualized_return": 0.12,
+            "var_95_historical": -0.018,
+            "cvar_95": -0.025,
         }
         rolling = returns.rolling(60).mean() / returns.rolling(60).std() * np.sqrt(252)
         app = create_dashboard(returns, weights, risk, rolling)
