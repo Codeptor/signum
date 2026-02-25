@@ -20,7 +20,6 @@ from python.backtest.validation import deflated_sharpe_ratio, walk_forward_split
 from python.bridge.bl_views import create_bl_views
 from python.data.ingestion import extract_close_prices, reshape_ohlcv_wide_to_long
 from python.portfolio.optimizer import PortfolioOptimizer
-from python.portfolio.risk_manager import RiskLimits, RiskManager
 
 logger = logging.getLogger(__name__)
 
@@ -388,7 +387,8 @@ def run_backtest(
     # Weight history DataFrame
     weight_history_df = pd.DataFrame(weight_history).set_index("date").fillna(0.0)
 
-    return {
+    # Build results dict
+    results = {
         "portfolio_returns": portfolio_returns,
         "gross_returns": gross_returns,
         "weights": latest_weights,
@@ -424,7 +424,7 @@ def run_backtest(
         )
 
         # Add key risk metrics to results
-        result["risk_metrics"] = {
+        results["risk_metrics"] = {
             "sortino_ratio": risk_engine.sortino_ratio(),
             "calmar_ratio": risk_engine.calmar_ratio(),
             "omega_ratio": risk_engine.omega_ratio(),
@@ -435,7 +435,9 @@ def run_backtest(
 
     # Add RiskManager summary if enabled
     if risk_manager is not None:
-        result["risk_summary"] = risk_manager.get_risk_summary()
+        results["risk_summary"] = risk_manager.get_risk_summary()
+
+    return results
 
 
 def save_results(results: dict, output_dir: Path = RESULTS_DIR) -> None:

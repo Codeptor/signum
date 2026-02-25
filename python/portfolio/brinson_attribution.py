@@ -8,9 +8,8 @@ Decomposes portfolio returns into:
 Reference: Brinson, Hood & Beebower (1986), "Determinants of Portfolio Performance"
 """
 
-from typing import Dict, Optional
+from typing import Dict
 
-import numpy as np
 import pandas as pd
 
 

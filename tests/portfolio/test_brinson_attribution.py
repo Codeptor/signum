@@ -1,6 +1,5 @@
 """Tests for Brinson attribution model."""
 
-import numpy as np
 import pandas as pd
 import pytest
 
