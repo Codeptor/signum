@@ -20,6 +20,7 @@ from python.backtest.validation import deflated_sharpe_ratio, walk_forward_split
 from python.bridge.bl_views import create_bl_views
 from python.data.ingestion import extract_close_prices, reshape_ohlcv_wide_to_long
 from python.portfolio.optimizer import PortfolioOptimizer
+from python.portfolio.risk_manager import RiskLimits, RiskManager
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +143,8 @@ def run_backtest(
     initial_capital: float = 10_000_000.0,
     impact_coeff: float = 0.1,
     fixed_bps: float = 5.0,
+    enable_risk_manager: bool = True,
+    risk_limits: dict | None = None,
 ) -> dict:
     """Walk-forward backtest with ML alpha, portfolio optimization, and transaction costs.
 
@@ -191,6 +194,18 @@ def run_backtest(
     total_turnover = 0.0
     n_rebalances = 0
     current_capital = initial_capital
+
+    # Initialize RiskManager if enabled
+    risk_manager = None
+    if enable_risk_manager:
+        from python.portfolio.risk_manager import RiskLimits, RiskManager
+
+        limits = RiskLimits(**risk_limits) if risk_limits else RiskLimits()
+        risk_manager = RiskManager(limits=limits)
+        logger.info(
+            f"RiskManager enabled with limits: max_position={limits.max_position_weight:.1%}, "
+            f"max_daily_trades={limits.max_daily_trades}"
+        )
 
     for fold, (train_idx, test_idx) in enumerate(walk_forward_split(labeled, n_splits=n_splits)):
         logger.info(f"Fold {fold}: train={len(train_idx)}, test={len(test_idx)}")
@@ -255,6 +270,34 @@ def run_backtest(
                 weights = blend_alpha * w_target + (1 - blend_alpha) * w_prev
                 weights = weights[weights > 1e-6]
                 weights /= weights.sum()
+
+            # Risk Manager: Validate position sizes before execution
+            if risk_manager is not None:
+                date_str = date.strftime("%Y-%m-%d") if hasattr(date, "strftime") else str(date)
+                risk_violations = []
+
+                for ticker, weight in weights.items():
+                    can_trade, issues = risk_manager.can_execute_trade(
+                        ticker=ticker,
+                        new_weight=weight,
+                        current_date=date_str,
+                    )
+                    if not can_trade:
+                        risk_violations.extend(issues)
+                        # Reduce position to comply with limits
+                        weights[ticker] = min(weight, risk_manager.limits.max_position_weight)
+
+                if risk_violations:
+                    logger.warning(f"Risk violations on {date_str}: {len(risk_violations)} issues")
+                    # Re-normalize weights after adjustments
+                    if weights.sum() > 0:
+                        weights /= weights.sum()
+
+                # Record trades for daily limit tracking
+                for ticker in weights.index:
+                    weight_change = abs(weights[ticker] - prev_weights.get(ticker, 0))
+                    if weight_change > 0.001:  # Only record meaningful changes
+                        risk_manager.record_trade(ticker, weight_change, date_str)
 
             # Extract current day's liquidity profiles
             top_data = group.set_index("ticker")
@@ -364,7 +407,35 @@ def run_backtest(
         ),
         "optimizer_method": optimizer_method,
         "n_folds": n_splits,
+        "risk_manager_enabled": enable_risk_manager,
     }
+
+    # Add comprehensive risk metrics if we have enough history
+    if len(portfolio_returns) > 30:
+        from python.portfolio.risk import RiskEngine
+
+        # Create RiskEngine with dummy weights (equal weighted portfolio)
+        dummy_weights = pd.Series(
+            {ticker: 1.0 / len(prices.columns) for ticker in prices.columns[:5]}
+        )
+        risk_engine = RiskEngine(
+            returns=prices.pct_change().dropna().iloc[-min(len(prices), 252) :],
+            weights=dummy_weights,
+        )
+
+        # Add key risk metrics to results
+        result["risk_metrics"] = {
+            "sortino_ratio": risk_engine.sortino_ratio(),
+            "calmar_ratio": risk_engine.calmar_ratio(),
+            "omega_ratio": risk_engine.omega_ratio(),
+            "var_95": risk_engine.var_historical(0.95),
+            "cvar_95": risk_engine.cvar_historical(0.95),
+            "downside_deviation": risk_engine.downside_deviation(),
+        }
+
+    # Add RiskManager summary if enabled
+    if risk_manager is not None:
+        result["risk_summary"] = risk_manager.get_risk_summary()
 
 
 def save_results(results: dict, output_dir: Path = RESULTS_DIR) -> None:
