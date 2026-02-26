@@ -99,7 +99,11 @@ def _initialize_risk_engine(broker: AlpacaBroker, risk_manager: RiskManager) -> 
     logger.warning("Risk engine could not be initialized — risk checks will be no-ops.")
 
 
-def run_trading_cycle(broker: AlpacaBroker, risk_manager: RiskManager) -> bool:
+def run_trading_cycle(
+    broker: AlpacaBroker,
+    risk_manager: RiskManager,
+    bridge: ExecutionBridge,
+) -> bool:
     """The core daily trading logic. Returns True if trades were executed."""
     logger.info("=" * 60)
     logger.info("Starting daily trading cycle...")
@@ -168,7 +172,7 @@ def run_trading_cycle(broker: AlpacaBroker, risk_manager: RiskManager) -> bool:
         logger.error("No tradeable tickers remaining — skipping cycle")
         return False
 
-    # 4. Set up execution bridge with current account state
+    # 4. Sync execution bridge with current account/positions from broker
     account = broker.get_account()
     logger.info(
         f"Account equity: ${account.equity:,.2f} | "
@@ -176,7 +180,8 @@ def run_trading_cycle(broker: AlpacaBroker, risk_manager: RiskManager) -> bool:
         f"Buying power: ${account.buying_power:,.2f}"
     )
 
-    bridge = ExecutionBridge(risk_manager=risk_manager, initial_capital=account.equity)
+    # Update bridge equity from broker (authoritative source)
+    bridge.equity = account.equity
 
     # Sync current positions from broker into the bridge
     current_positions = broker.list_positions()
@@ -300,6 +305,11 @@ def main():
     # Initialize risk engine with current positions' historical data
     _initialize_risk_engine(broker, risk_manager)
 
+    # Create execution bridge once — persists equity curve, P&L, and weight
+    # history across cycles. Each cycle syncs positions/equity from broker.
+    account = broker.get_account()
+    bridge = ExecutionBridge(risk_manager=risk_manager, initial_capital=account.equity)
+
     try:
         while True:
             clock = broker.get_clock()
@@ -321,7 +331,7 @@ def main():
                     time.sleep(60 * 30)
                     continue
 
-                traded = run_trading_cycle(broker, risk_manager)
+                traded = run_trading_cycle(broker, risk_manager, bridge)
 
                 if traded:
                     logger.info(f"Sleeping {SLEEP_AFTER_TRADE_HOURS}h until next cycle...")
