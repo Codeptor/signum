@@ -29,7 +29,7 @@ jobs:
         run: pip install uv
 
       - name: Install dependencies
-        run: uv pip install -e ".[dev,portfolio]" --system
+        run: uv pip install -e ".[dev,portfolio,broker]" --system
 
       - name: Lint with ruff
         run: ruff check python/ tests/
