@@ -275,7 +275,11 @@ def purged_kfold_cv(
             logger.warning(f"Fold {fold_num + 1}: too few valid predictions, skipping")
             continue
 
-        ic = float(np.corrcoef(preds[mask], y_true[mask])[0, 1])
+        # H-PEARSON fix: use Spearman rank IC instead of Pearson.
+        from scipy.stats import spearmanr
+
+        ic_val, _ = spearmanr(preds[mask], y_true[mask])
+        ic = float(ic_val) if not np.isnan(ic_val) else 0.0
         fold_ics.append(ic)
         logger.info(
             f"Fold {fold_num + 1}/{n_splits}: IC = {ic:.4f} "

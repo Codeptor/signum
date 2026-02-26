@@ -23,17 +23,25 @@ logger = logging.getLogger(__name__)
 
 
 def _safe_ic(pred: np.ndarray, actual: np.ndarray) -> float:
-    """Compute Information Coefficient with NaN/zero-variance guard.
+    """Compute rank Information Coefficient with NaN/zero-variance guard.
 
     C-CORR fix: ``np.corrcoef`` returns NaN when either array has zero
     variance, and ``max(0.0, nan)`` propagates nondeterministically in
     Python.  This helper returns 0.0 in all degenerate cases.
+
+    H-PEARSON fix: uses Spearman rank correlation instead of Pearson.
+    Rank IC is the standard metric in cross-sectional equity models
+    because it is invariant to monotonic transformations of the signal
+    and robust to outliers.
     """
+    from scipy.stats import spearmanr
+
     if len(pred) < 2 or len(actual) < 2:
         return 0.0
     if np.std(pred) < 1e-10 or np.std(actual) < 1e-10:
         return 0.0
-    ic = float(np.corrcoef(pred, actual)[0, 1])
+    ic, _ = spearmanr(pred, actual)
+    ic = float(ic)
     return 0.0 if (np.isnan(ic) or ic < 0) else ic
 
 
@@ -125,7 +133,27 @@ class ModelEnsemble:
 
         # 1. LightGBM (uses CrossSectionalModel interface — pass DataFrames)
         logger.info("  Training LightGBM...")
-        self.lgbm.fit(df, target_col=target_col, val_df=val_df)
+
+        # H-ICVAL fix: split val_df into two disjoint halves — one for
+        # LightGBM early-stopping, one for IC-based weight calibration.
+        # Using the same data for both causes the ensemble to overfit
+        # to the early-stopping holdout.
+        early_stop_df: Optional[pd.DataFrame] = None
+        ic_cal_df: Optional[pd.DataFrame] = None
+        if val_df is not None and len(val_df) > 20:
+            n_val = len(val_df)
+            mid = n_val // 2
+            early_stop_df = val_df.iloc[:mid]
+            ic_cal_df = val_df.iloc[mid:]
+            logger.info(
+                f"  H-ICVAL: split val into early-stop ({len(early_stop_df)}) "
+                f"and IC-cal ({len(ic_cal_df)})"
+            )
+        elif val_df is not None:
+            # Too small to split — use for early stopping only, skip IC cal
+            early_stop_df = val_df
+
+        self.lgbm.fit(df, target_col=target_col, val_df=early_stop_df)
 
         # 2. Random Forest (sklearn interface — needs arrays)
         logger.info("  Training Random Forest...")
@@ -138,9 +166,9 @@ class ModelEnsemble:
         self._fitted = True
         logger.info("  Ensemble training complete")
 
-        # If validation data provided, calibrate weights by IC
-        if val_df is not None and len(val_df) > 0:
-            self.calibrate_weights(val_df, target_col=target_col)
+        # If IC-calibration holdout available, calibrate weights
+        if ic_cal_df is not None and len(ic_cal_df) > 10:
+            self.calibrate_weights(ic_cal_df, target_col=target_col)
 
     def predict(self, df: pd.DataFrame) -> np.ndarray:
         """Weighted average prediction from all sub-models.

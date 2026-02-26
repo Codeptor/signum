@@ -391,6 +391,22 @@ def merge_macro_features(
 
     # Forward-fill and join on date (level-0 of df's index)
     macro = macro.reindex(df.index.get_level_values(0).unique()).ffill()
+
+    # H-MACRO fix: for dates before the first macro observation (e.g. early
+    # training rows), ffill produces NaN which then drops rows from the
+    # training set.  Back-fill first, then fill any remaining NaN with
+    # domain-appropriate neutral defaults.
+    macro = macro.bfill()
+    _macro_neutral = {
+        "vix": 20.0,
+        "vix_ma_ratio": 1.0,
+        "term_spread": 1.0,
+        "term_spread_change_20d": 0.0,
+    }
+    for col in macro_cols:
+        if col in _macro_neutral:
+            macro[col] = macro[col].fillna(_macro_neutral[col])
+
     for col in macro_cols:
         df[col] = df.index.get_level_values(0).map(macro[col])
 

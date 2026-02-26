@@ -42,7 +42,11 @@ def fetch_sp500_tickers() -> list[str]:
     rather than hardcoding ``[0]`` and ``"Symbol"``.
     """
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    tables = pd.read_html(url, storage_options={"User-Agent": "quant-platform/0.1"})
+    # H-WIKI fix: add timeout to prevent indefinite hangs
+    tables = pd.read_html(
+        url,
+        storage_options={"User-Agent": "quant-platform/0.1", "timeout": "15"},
+    )
 
     # H12 fix: search tables for a column that looks like ticker symbols
     symbol_col = None
@@ -68,6 +72,15 @@ def fetch_sp500_tickers() -> list[str]:
     tickers = target_table[symbol_col].str.replace(".", "-", regex=False).tolist()
     # Filter out any non-string or NaN entries
     tickers = [t for t in tickers if isinstance(t, str) and len(t) > 0]
+
+    # H-WIKI fix: validate ticker count — S&P 500 should have ~500 members.
+    # If the count is wildly off, the scrape likely hit the wrong table.
+    n = len(tickers)
+    if n < 490 or n > 520:
+        logger.warning(
+            f"H-WIKI: fetched {n} tickers from Wikipedia (expected 490-520). "
+            "The table structure may have changed."
+        )
     return sorted(tickers)
 
 
@@ -84,6 +97,9 @@ def fetch_ohlcv(
 ) -> pd.DataFrame:
     """Download OHLCV data for given tickers via yfinance."""
     logger.info(f"Fetching OHLCV for {len(tickers)} tickers, period={period}")
+    # H-YFIN fix: always use auto_adjust=True so Close/Open/High/Low are
+    # split-and-dividend adjusted.  Without this, features computed on raw
+    # prices show spurious jumps at ex-dividend and split dates.
     df = yf.download(
         tickers,
         period=period,
@@ -91,6 +107,7 @@ def fetch_ohlcv(
         group_by="ticker",
         threads=True,
         timeout=YFINANCE_TIMEOUT,
+        auto_adjust=True,
     )
 
     # --- NaN validation (Finding #28) ---
@@ -185,7 +202,11 @@ def fetch_fred_macro() -> pd.DataFrame:
     for ticker, name in macro_tickers.items():
         try:
             data = yf.download(
-                ticker, period=DEFAULT_PERIOD, interval=DEFAULT_INTERVAL, timeout=YFINANCE_TIMEOUT
+                ticker,
+                period=DEFAULT_PERIOD,
+                interval=DEFAULT_INTERVAL,
+                timeout=YFINANCE_TIMEOUT,
+                auto_adjust=True,
             )
             if data is None or data.empty:
                 logger.warning(f"Macro ticker {ticker} ({name}): no data returned, skipping")
@@ -235,13 +256,35 @@ def extract_close_prices(df: pd.DataFrame) -> pd.DataFrame:
     """Extract a simple (date x ticker) close-price matrix from yfinance output.
 
     Returns DataFrame with DatetimeIndex and one column per ticker.
+
+    H-MULTIIDX fix: uses ``df.xs("Close", axis=1, level=...)`` to safely
+    handle both ``(ticker, OHLCV)`` and ``(OHLCV, ticker)`` MultiIndex
+    layouts from different yfinance versions, instead of hard-coding
+    ``df[(t, "Close")]`` which assumes a specific level order.
     """
     if isinstance(df.columns, pd.MultiIndex):
-        tickers = df.columns.get_level_values(0).unique()
-        return pd.DataFrame(
-            {t: df[(t, "Close")].values for t in tickers},
-            index=df.index,
-        )
+        # Determine which level contains the OHLCV labels
+        level_0_vals = set(df.columns.get_level_values(0).unique())
+        ohlcv_names = {
+            "Close",
+            "Open",
+            "High",
+            "Low",
+            "Volume",
+            "close",
+            "open",
+            "high",
+            "low",
+            "volume",
+            "Adj Close",
+        }
+        if level_0_vals & ohlcv_names:
+            # Level 0 is OHLCV (e.g. newer yfinance: ("Close", "AAPL"))
+            close_df = df.xs("Close", axis=1, level=0)
+        else:
+            # Level 0 is ticker (e.g. group_by="ticker": ("AAPL", "Close"))
+            close_df = df.xs("Close", axis=1, level=1)
+        return close_df
     return df
 
 
