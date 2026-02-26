@@ -164,9 +164,13 @@ def fetch_ohlcv(
 
     remaining_nans = df.isna().sum().sum()
     if remaining_nans > 0:
+        # M-LOGMSG fix: message now accurately describes what happens — we
+        # drop fully-NaN rows and fill scattered gaps, not "dropping N NaN values".
+        remaining_nan_rows = df.isna().any(axis=1).sum()
         logger.warning(
-            f"Dropping residual NaN: {remaining_nans} values across "
-            f"{df.isna().any(axis=1).sum()} rows after ffill + ticker pruning"
+            f"Residual NaN after ffill + ticker pruning: {remaining_nans} values "
+            f"across {remaining_nan_rows} rows. Dropping all-NaN rows and "
+            f"filling scattered single-cell gaps (ffill/bfill limit=1)."
         )
         # Drop rows that are entirely NaN, then forward-fill any scattered
         # single-cell gaps that survived (limited to 1 for safety).

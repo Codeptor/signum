@@ -223,7 +223,11 @@ class PortfolioOptimizer:
         if self.current_weights is None or self.current_weights.empty:
             return new_weights
 
-        # Calculate turnover: half the sum of absolute weight changes
+        # M-TURNOVER fix: include ALL held positions in the turnover calc,
+        # not just tickers that appear in new_weights.  Positions being sold
+        # (in current_weights but absent from new_weights) contribute to
+        # turnover and must be counted, otherwise sell-side turnover is
+        # systematically underestimated.
         all_tickers = sorted(set(new_weights.index) | set(self.current_weights.index))
         w_new = new_weights.reindex(all_tickers, fill_value=0.0)
         w_old = self.current_weights.reindex(all_tickers, fill_value=0.0)

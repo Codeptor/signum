@@ -355,21 +355,28 @@ def compute_cross_sectional_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def merge_macro_features(
     df: pd.DataFrame,
-    macro_path: str = "data/raw/macro_indicators.parquet",
+    macro_path: str | Path = "data/raw/macro_indicators.parquet",
 ) -> pd.DataFrame:
     """Merge macro regime features (VIX, yields) into the feature DataFrame.
 
     Loads macro data, computes derived signals, and broadcasts to all tickers
     via date alignment with forward-fill.
+
+    M-MACROPATH fix: when ``macro_path`` is relative, it is resolved relative
+    to the project root (2 levels up from this file: ``python/alpha/``) so
+    that the function works regardless of the caller's working directory.
     """
     import logging
 
     logger = logging.getLogger(__name__)
 
-    # Check if macro file exists
-    import os
+    # M-MACROPATH fix: resolve relative paths against project root
+    macro_path = Path(macro_path)
+    if not macro_path.is_absolute():
+        project_root = Path(__file__).resolve().parent.parent.parent
+        macro_path = project_root / macro_path
 
-    if not os.path.exists(macro_path):
+    if not macro_path.exists():
         logger.warning(f"Macro indicators file not found: {macro_path}. Skipping macro features.")
         return df
 
@@ -459,18 +466,25 @@ def get_current_atr(
     symbol: str,
     window: int = 14,
     period: str = "3mo",
+    default: float | None = None,
 ) -> float | None:
     """Fetch current ATR for a single symbol from Yahoo Finance.
 
     Convenience function for the live bot to get ATR for stop-loss placement.
 
+    M-ATR fix: added ``default`` parameter and NaN guard.  When the ATR
+    computation fails or returns NaN, the function returns ``default``
+    instead of ``None``.  Callers can pass a neutral default (e.g. a
+    fraction of current price) to avoid downstream ``None`` type errors.
+
     Args:
         symbol: Ticker symbol.
         window: ATR lookback period.
         period: Yahoo Finance period string for data fetch.
+        default: Value to return if ATR cannot be computed.
 
     Returns:
-        Current ATR value, or None if data unavailable.
+        Current ATR value, or ``default`` if data unavailable or NaN.
     """
     import logging
 
@@ -482,7 +496,7 @@ def get_current_atr(
         data = yf.download(symbol, period=period, interval="1d", progress=False)
         if data is None or len(data) < window + 1:
             logger.warning(f"Insufficient data for ATR computation: {symbol}")
-            return None
+            return default
 
         # Compute ATR
         high = data["High"]
@@ -497,11 +511,15 @@ def get_current_atr(
         atr = true_range.rolling(window).mean()
 
         current_atr = float(atr.iloc[-1])
+        # M-ATR fix: guard against NaN result (e.g. all-NaN rolling window)
+        if pd.isna(current_atr):
+            logger.warning(f"ATR({window}) for {symbol} is NaN — returning default")
+            return default
         logger.debug(f"ATR({window}) for {symbol}: {current_atr:.2f}")
         return current_atr
     except Exception as e:
         logger.warning(f"Failed to compute ATR for {symbol}: {e}")
-        return None
+        return default
 
 
 def compute_residual_target(df: pd.DataFrame, horizon: int = 5) -> pd.DataFrame:
