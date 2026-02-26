@@ -1,10 +1,18 @@
 """Alpaca broker implementation for paper and live trading."""
 
+import hashlib
 import logging
 import os
 from typing import Dict, List, Optional
 
 import pandas as pd
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from python.brokers.base import (
     BaseBroker,
@@ -14,6 +22,25 @@ from python.brokers.base import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Retry decorator for idempotent read operations (GET requests).
+_retry_read = retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=15),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    reraise=True,
+)
+
+# Retry decorator for order submission — only retries on connection-level
+# errors (OSError covers socket/network).  We do NOT retry on 4xx/5xx
+# Alpaca errors because the order may have been accepted server-side.
+_retry_submit = retry(
+    stop=stop_after_attempt(2),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    retry=retry_if_exception_type((OSError, ConnectionError, TimeoutError)),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    reraise=True,
+)
 
 
 class AlpacaBroker(BaseBroker):
@@ -63,6 +90,7 @@ class AlpacaBroker(BaseBroker):
 
         self._connected = False
 
+    @_retry_read
     def connect(self) -> bool:
         """Connect to Alpaca API and verify credentials."""
         try:
@@ -79,6 +107,19 @@ class AlpacaBroker(BaseBroker):
             self._connected = False
             return False
 
+    @staticmethod
+    def _make_client_order_id(order: BrokerOrder) -> str:
+        """Generate a deterministic client_order_id to prevent duplicate orders.
+
+        Uses symbol + side + qty + order_type + minute-resolution timestamp so
+        that an identical order submitted within the same minute is idempotent.
+        """
+        import time
+
+        minute_ts = int(time.time()) // 60
+        raw = f"{order.symbol}|{order.side}|{order.qty}|{order.order_type}|{minute_ts}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:24]
+
     def disconnect(self) -> None:
         """Disconnect from Alpaca API."""
         self._connected = False
@@ -88,6 +129,7 @@ class AlpacaBroker(BaseBroker):
         """Check if connected to Alpaca."""
         return self._connected
 
+    @_retry_read
     def get_account(self) -> BrokerAccount:
         """Get Alpaca account information."""
         if not self._connected:
@@ -104,14 +146,38 @@ class AlpacaBroker(BaseBroker):
             status=account.status,
         )
 
+    @_retry_submit
     def submit_order(self, order: BrokerOrder) -> str:
         """Submit an order to Alpaca.
 
         Supports simple orders (market, limit, stop) and bracket orders
         with attached stop-loss and/or take-profit legs.
+
+        A deterministic ``client_order_id`` is auto-generated when the
+        caller does not provide one, preventing duplicate orders on retry.
         """
         if not self._connected:
             raise ConnectionError("Not connected to Alpaca. Call connect() first.")
+
+        # --- Idempotency (Finding #31) ---
+        if order.client_order_id is None:
+            order = BrokerOrder(
+                symbol=order.symbol,
+                side=order.side,
+                qty=order.qty,
+                order_type=order.order_type,
+                limit_price=order.limit_price,
+                stop_price=order.stop_price,
+                time_in_force=order.time_in_force,
+                client_order_id=self._make_client_order_id(order),
+                order_id=order.order_id,
+                parent_order_id=order.parent_order_id,
+                status=order.status,
+                order_class=order.order_class,
+                take_profit_limit_price=order.take_profit_limit_price,
+                stop_loss_stop_price=order.stop_loss_stop_price,
+                stop_loss_limit_price=order.stop_loss_limit_price,
+            )
 
         try:
             kwargs = {
@@ -155,6 +221,7 @@ class AlpacaBroker(BaseBroker):
             logger.error(f"Failed to submit order: {e}")
             raise
 
+    @_retry_read
     def cancel_order(self, order_id: str) -> bool:
         """Cancel an open order."""
         if not self._connected:
@@ -168,6 +235,7 @@ class AlpacaBroker(BaseBroker):
             logger.error(f"Failed to cancel order {order_id}: {e}")
             return False
 
+    @_retry_read
     def cancel_all_orders(self) -> int:
         """Cancel all open orders. Returns count of cancelled orders."""
         if not self._connected:
@@ -182,6 +250,7 @@ class AlpacaBroker(BaseBroker):
             logger.error(f"Failed to cancel all orders: {e}")
             raise
 
+    @_retry_read
     def get_order(self, order_id: str) -> Optional[BrokerOrder]:
         """Get order status by ID."""
         if not self._connected:
@@ -207,6 +276,7 @@ class AlpacaBroker(BaseBroker):
             logger.error(f"Failed to get order {order_id}: {e}")
             return None
 
+    @_retry_read
     def list_orders(self, status: str = "open") -> List[BrokerOrder]:
         """List orders with given status."""
         if not self._connected:
@@ -235,6 +305,7 @@ class AlpacaBroker(BaseBroker):
             logger.error(f"Failed to list orders: {e}")
             return []
 
+    @_retry_read
     def get_position(self, symbol: str) -> Optional[BrokerPosition]:
         """Get position for a symbol."""
         if not self._connected:
@@ -254,6 +325,7 @@ class AlpacaBroker(BaseBroker):
             # Position might not exist
             return None
 
+    @_retry_read
     def list_positions(self) -> List[BrokerPosition]:
         """List all positions."""
         if not self._connected:
@@ -276,6 +348,7 @@ class AlpacaBroker(BaseBroker):
             logger.error(f"Failed to list positions: {e}")
             return []
 
+    @_retry_read
     def get_latest_price(self, symbol: str) -> float:
         """Get latest price for a symbol.
 
@@ -296,6 +369,7 @@ class AlpacaBroker(BaseBroker):
         # Fallback to yfinance
         return self._yfinance_price(symbol)
 
+    @_retry_read
     def get_latest_prices(self, symbols: list[str]) -> Dict[str, float]:
         """Batch fetch latest prices for multiple symbols.
 
@@ -359,6 +433,7 @@ class AlpacaBroker(BaseBroker):
             return float(price)
         raise ValueError(f"Could not get price for {symbol} from yfinance")
 
+    @_retry_read
     def get_clock(self) -> Dict:
         """Get market clock."""
         if not self._connected:
@@ -376,6 +451,7 @@ class AlpacaBroker(BaseBroker):
             logger.error(f"Failed to get market clock: {e}")
             raise
 
+    @_retry_read
     def get_bars(
         self,
         symbol: str,
