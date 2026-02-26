@@ -419,20 +419,34 @@ These items from the Round 1 re-audit were not addressed in Round 2 because they
 
 ## Part 5: Final Paper-Trading Readiness Verdict
 
-**Date:** 2026-02-27
-**Test baseline:** 415 tests passing (full suite), 0 failures
+**Date:** 2026-02-27 (updated)
+**Test baseline:** 441 tests passing (full suite), 0 failures
 
-### Assessment: CONDITIONALLY READY
+### Assessment: READY FOR PAPER TRADING
 
-The platform is ready for paper trading **after merging both audit branches to main**.
+Both audit branches have been merged to `main`. An additional 12 post-merge
+fixes resolved all remaining timezone, exception handling, and code correctness
+issues. No known blockers remain.
 
-### Merge Checklist
+### Completed Post-Merge Fixes (commit `184e029`)
 
-1. Merge `fix/audit-round2-execution` (Claude Code) → `main`
-2. Merge `fix/audit-round2-pipeline` (OpenCode) → `main`
-3. Resolve any merge conflicts (expected: `AGENTS.md` only)
-4. Run full test suite: `uv run pytest tests/ -x -q` — must pass 415+ tests
-5. Create `.env` from `.env.example` with valid Alpaca paper trading credentials
+| Fix | Files | Description |
+|-----|-------|-------------|
+| Timezone consistency | `live_bot.py`, `execution.py`, `risk_manager.py`, `predict.py` | All `datetime.now()` and `pd.Timestamp.now()` calls now use explicit timezones (NY for trading logic, UTC for internal timestamps) |
+| Silent exceptions | `live_bot.py`, `alpaca_broker.py` | 5 bare `except: pass` handlers now log warnings so failures are diagnosable |
+| `feature_importance()` guard | `model.py` | Raises `ValueError` if called before `fit()` |
+| `best_iteration_` check | `model.py` | Uses `is not None` instead of falsy check |
+| Negative weight clamp | `risk_manager.py` | `record_trade` clamps weights to `[0, 1]` |
+| `risk_based_size` fix | `risk_manager.py` | Always returns a fraction regardless of `portfolio_value` |
+| `print()` cleanup | `risk_attribution.py` | Replaced with `logger.error()` |
+| Hanging test fix | `test_live_bot_helpers.py` | Added missing `should_rebalance_today` mock |
+
+### Deployment Checklist
+
+1. Create `.env` from `.env.example` with valid Alpaca paper trading credentials
+2. Run full test suite: `uv run pytest tests/ -q` — must pass 441 tests
+3. Dry run: `source .env && uv run python examples/dry_run.py`
+4. Start: `source .env && ./run_live_bot.sh`
 
 ### What Is Now Solid
 
