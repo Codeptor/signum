@@ -41,18 +41,29 @@ def _cap_weights(weights: pd.Series, max_weight: float) -> pd.Series:
 class PortfolioOptimizer:
     """Multi-strategy portfolio optimizer using skfolio."""
 
-    def __init__(self, prices: pd.DataFrame, max_weight: Optional[float] = None):
+    def __init__(
+        self,
+        prices: pd.DataFrame,
+        max_weight: Optional[float] = None,
+        current_weights: Optional[pd.Series] = None,
+        turnover_threshold: float = 0.20,
+    ):
         """Initialize with a DataFrame of asset prices (columns=tickers, index=dates).
 
         Args:
             prices: Price DataFrame (columns=tickers, index=dates).
             max_weight: Optional cap on individual asset weight (e.g. 0.25).
                 Applied after optimization via iterative redistribution (Fix #18).
+            current_weights: Current portfolio weights for turnover-aware optimization.
+            turnover_threshold: Minimum turnover to justify rebalancing (default 20%).
+                If computed turnover is below this threshold, current weights are kept.
         """
         self.prices = prices
         self.returns = prices.pct_change().dropna()
         self.tickers = list(prices.columns)
         self.max_weight = max_weight
+        self.current_weights = current_weights
+        self.turnover_threshold = turnover_threshold
 
     def hrp(self) -> pd.Series:
         """Hierarchical Risk Parity allocation."""
@@ -165,6 +176,48 @@ class PortfolioOptimizer:
         if self.max_weight is not None:
             weights = _cap_weights(weights, self.max_weight)
         return weights
+
+    def optimize_with_turnover_penalty(self, method: str = "hrp") -> pd.Series:
+        """Run optimization with turnover penalty.
+
+        If current_weights are provided and computed turnover is below the
+        threshold, returns current_weights unchanged to avoid unnecessary trading.
+
+        Args:
+            method: Optimization method ('hrp', 'min_cvar', 'risk_parity').
+
+        Returns:
+            Optimized weights (or current weights if turnover is too low).
+        """
+        # Compute new target weights
+        if method == "hrp":
+            new_weights = self.hrp()
+        elif method == "min_cvar":
+            new_weights = self.min_cvar()
+        elif method == "risk_parity":
+            new_weights = self.risk_parity()
+        else:
+            logger.warning(f"Unknown method '{method}' for turnover penalty, using HRP")
+            new_weights = self.hrp()
+
+        if self.current_weights is None or self.current_weights.empty:
+            return new_weights
+
+        # Calculate turnover: half the sum of absolute weight changes
+        all_tickers = sorted(set(new_weights.index) | set(self.current_weights.index))
+        w_new = new_weights.reindex(all_tickers, fill_value=0.0)
+        w_old = self.current_weights.reindex(all_tickers, fill_value=0.0)
+        turnover = (w_new - w_old).abs().sum() / 2
+
+        if turnover < self.turnover_threshold:
+            logger.info(
+                f"Low turnover signal ({turnover:.1%} < {self.turnover_threshold:.1%}) "
+                f"— maintaining current positions"
+            )
+            return self.current_weights
+
+        logger.info(f"Turnover {turnover:.1%} exceeds threshold — rebalancing")
+        return new_weights
 
     def compare_all(
         self,

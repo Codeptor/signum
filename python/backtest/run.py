@@ -132,7 +132,7 @@ def run_backtest(
     top_n: int = 20,
     rebalance_days: int = 5,
     optimizer_method: str | dict = "black_litterman",
-    transaction_cost_bps: float = 10.0,
+    transaction_cost_bps: float = 15.0,  # 15 bps (realistic, up from 10)
     max_weight: float = 0.15,
     blend_alpha: float = 0.5,
     macro_path: str = "data/raw/macro_indicators.parquet",
@@ -141,7 +141,8 @@ def run_backtest(
     ohlcv: pd.DataFrame | None = None,
     initial_capital: float = 10_000_000.0,
     impact_coeff: float = 0.1,
-    fixed_bps: float = 5.0,
+    fixed_bps: float = 7.5,  # 7.5 bps fixed commission (up from 5)
+    slippage_bps: float = 5.0,  # 5 bps slippage estimate (NEW)
     enable_risk_manager: bool = True,
     risk_limits: dict | None = None,
 ) -> dict:
@@ -154,13 +155,15 @@ def run_backtest(
     top_n : number of top-ranked tickers to hold each period
     rebalance_days : holding period (forward return horizon)
     optimizer_method : 'equal_weight', 'black_litterman', 'hrp', 'min_cvar', 'risk_parity'
-    transaction_cost_bps : one-way transaction cost in basis points
+    transaction_cost_bps : one-way transaction cost in basis points (default 15)
     max_weight : maximum single-position weight (e.g. 0.15 = 15%)
     blend_alpha : weight on new allocation vs previous (1.0 = fully new, 0.5 = 50/50 blend)
     macro_path : path to macro indicators parquet (None to skip macro features)
     liquidity_filter_pct : exclude bottom N% by dollar volume (0.0 to disable)
     vix_scaling : if True, scale position size by VIX regime
     ohlcv : pre-built long-format OHLCV DataFrame (if None, synthesized from prices)
+    fixed_bps : fixed commission in basis points per trade (default 7.5)
+    slippage_bps : estimated slippage in basis points (default 5.0)
     """
     if ohlcv is None:
         ohlcv_frames = []
@@ -317,12 +320,15 @@ def run_backtest(
             # 2. Fixed Commissions
             fixed_cost = trade_value * (fixed_bps / 10_000)
 
-            # 3. Spread Drag
+            # 3. Slippage Cost (constant estimate per trade)
+            slippage_cost = trade_value * (slippage_bps / 10_000)
+
+            # 4. Spread Drag
             # Let's parameterize spread multiplier or zero it for debugging
             spread = top_data["bid_ask_proxy"].reindex(all_tickers).fillna(0).clip(0, 0.02)
             spread_cost = trade_value * spread * 0.5  # Half-spread as transaction cost
 
-            # 4. Market Impact
+            # 5. Market Impact
             adv = top_data["dollar_volume_20d"].reindex(all_tickers).fillna(1e6)
             volatility = top_data["vol_20d"].reindex(all_tickers).fillna(0.02)
 
@@ -335,8 +341,8 @@ def run_backtest(
 
             impact_cost = trade_value * impact_coeff * volatility * np.sqrt(participation)
 
-            # Total Costs
-            total_cost_usd = (fixed_cost + spread_cost + impact_cost).sum()
+            # Total Costs (fixed + slippage + spread + impact)
+            total_cost_usd = (fixed_cost + slippage_cost + spread_cost + impact_cost).sum()
             cost_pct = total_cost_usd / current_capital
 
             # Weighted return net of costs (use raw returns, not residual)
