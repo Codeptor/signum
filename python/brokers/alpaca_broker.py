@@ -92,20 +92,18 @@ class AlpacaBroker(BaseBroker):
 
     @_retry_read
     def connect(self) -> bool:
-        """Connect to Alpaca API and verify credentials."""
-        try:
-            # Test connection by getting account info
-            account = self.api.get_account()
-            self._connected = True
-            logger.info(
-                f"Connected to Alpaca {'paper' if self.paper_trading else 'live'} "
-                f"trading. Account: {account.id}, Status: {account.status}"
-            )
-            return True
-        except Exception as e:
-            logger.error(f"Failed to connect to Alpaca: {e}")
-            self._connected = False
-            return False
+        """Connect to Alpaca API and verify credentials.
+
+        M-CONNECT fix: removed internal try/except so @_retry_read decorator
+        can see the exception and retry on transient failures.
+        """
+        account = self.api.get_account()
+        self._connected = True
+        logger.info(
+            f"Connected to Alpaca {'paper' if self.paper_trading else 'live'} "
+            f"trading. Account: {account.id}, Status: {account.status}"
+        )
+        return True
 
     @staticmethod
     def _make_client_order_id(order: BrokerOrder) -> str:
@@ -345,8 +343,8 @@ class AlpacaBroker(BaseBroker):
             err_str = str(e).lower()
             if "position does not exist" in err_str or "not found" in err_str or "404" in err_str:
                 return None
-            logger.error(f"Unexpected error getting position for {symbol}: {e}")
-            return None
+            # M-GETPOS fix: raise on non-404 errors instead of silently returning None
+            raise
 
     @_retry_read
     def list_positions(self) -> List[BrokerPosition]:

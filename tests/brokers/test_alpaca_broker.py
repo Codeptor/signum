@@ -203,10 +203,13 @@ class TestConnectionLifecycle:
         assert b.is_connected() is True
 
     def test_connect_failure(self, disconnected_broker):
+        """M-CONNECT fix: connect now raises (retried by @_retry_read) instead of returning False."""
+        import pytest
+
         b, mock_rest = disconnected_broker
         mock_rest.get_account.side_effect = Exception("auth failed")
-        result = b.connect()
-        assert result is False
+        with pytest.raises(Exception, match="auth failed"):
+            b.connect()
         assert b.is_connected() is False
 
     def test_disconnect(self, broker):

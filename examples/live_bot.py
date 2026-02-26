@@ -299,7 +299,12 @@ def _cancel_existing_sl_tp_orders(broker: AlpacaBroker, symbol: str) -> int:
             if order.symbol == symbol and order.order_type in ("stop", "limit"):
                 # SL orders are stop orders, TP orders are limit orders
                 # Both are sell-side (closing the position)
-                if order.side.lower() == "sell" and order.order_id:
+                # M-CANCEL fix: also check order_class to avoid cancelling
+                # non-SL/TP sell-side limit orders (e.g. manual sells)
+                is_sl_tp = (
+                    getattr(order, "order_class", None) in ("oco", "oto", "bracket", None)
+                )
+                if order.side.lower() == "sell" and order.order_id and is_sl_tp:
                     try:
                         broker.cancel_order(order.order_id)
                         cancelled += 1
@@ -1151,14 +1156,16 @@ def main():
         logger.error(f"Fatal error in bot loop: {e}", exc_info=True)
         _send_alert(f"[LiveBot FATAL] Bot crashed at {datetime.now().isoformat()}: {e}")
     finally:
-        # Persist final state before exit (P1-6)
-        _save_bot_state(
-            {
-                "last_shutdown": datetime.now().isoformat(),
-                "final_equity": bridge.equity if "bridge" in locals() else None,
-                "reason": "shutdown",
-            }
-        )
+        # M-SIGTERM fix: don't overwrite richer SIGTERM state
+        saved = _load_bot_state()
+        if not saved or saved.get("reason") != "sigterm":
+            _save_bot_state(
+                {
+                    "last_shutdown": datetime.now().isoformat(),
+                    "final_equity": bridge.equity if "bridge" in locals() else None,
+                    "reason": "shutdown",
+                }
+            )
         broker.disconnect()
         logger.info("Bot shutdown complete.")
 

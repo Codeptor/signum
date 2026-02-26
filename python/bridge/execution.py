@@ -397,6 +397,11 @@ class ExecutionBridge:
             if ticker not in prices:
                 continue
 
+            # M-NANWT fix: skip NaN weights to prevent positions being locked
+            if pd.isna(target_weight):
+                logger.warning(f"NaN weight for {ticker}, skipping (position unchanged)")
+                continue
+
             current_price = prices[ticker]
             if current_price <= 0:
                 logger.warning(f"Invalid price {current_price} for {ticker}, skipping")
