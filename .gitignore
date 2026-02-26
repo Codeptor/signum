@@ -14,6 +14,9 @@ mlruns/
 # IDE and editor files
 .serena/
 
+# Worktrees
+.worktrees/
+
 # Agent/skill configuration (user-specific)
 .agent/
 .agents/

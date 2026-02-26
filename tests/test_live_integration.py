@@ -202,7 +202,9 @@ class TestRunTradingCycleIntegration:
         # Each OCO should have both a limit price (TP) and stop_loss_stop_price (SL)
         for oco in oco_orders:
             assert oco.limit_price is not None, f"OCO for {oco.symbol} missing TP limit_price"
-            assert oco.stop_loss_stop_price is not None, f"OCO for {oco.symbol} missing SL stop_price"
+            assert oco.stop_loss_stop_price is not None, (
+                f"OCO for {oco.symbol} missing SL stop_price"
+            )
 
     @patch("examples.live_bot.get_ml_weights")
     @patch("time.sleep", return_value=None)

@@ -63,6 +63,12 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W"]
 
+[tool.ruff.lint.per-file-ignores]
+# X, X_train, X_val, X_clean are standard ML conventions for feature matrices
+"python/alpha/ensemble.py" = ["N806"]
+"tests/alpha/test_ensemble.py" = ["N806"]
+"tests/backtest/test_purged_cv.py" = ["N806"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

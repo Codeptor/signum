@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from python.data.ingestion import fetch_ohlcv, fetch_sp500_tickers, YFINANCE_TIMEOUT
+from python.data.ingestion import YFINANCE_TIMEOUT, fetch_ohlcv, fetch_sp500_tickers
 
 
 @pytest.mark.network
@@ -81,13 +81,6 @@ class TestRobustWikipediaScraping:
         """When no table has a recognized symbol column, falls back to table[0]['Symbol']."""
         import python.data.ingestion as ingestion_mod
 
-        # Table has 'Symbol' but column name is uppercase — heuristic uses .lower()
-        # so "SYMBOL" should NOT match (it checks exact lowercase values)
-        table = pd.DataFrame({"Company": ["Apple"], "Symbol": ["AAPL"]})
-        # Actually "symbol" IS in the heuristic, so this will match.
-        # Use a table with no symbol-like column at all for fallback:
-        weird_table = pd.DataFrame({"Code": ["AAPL"], "Name": ["Apple"]})
-        # But fallback expects table[0]["Symbol"] — which won't exist either.
         # Test that the function still works with the fallback path:
         fallback_table = pd.DataFrame({"Symbol": ["AAPL", "MSFT"], "Name": ["a", "b"]})
         # The heuristic won't find "Code" as a symbol column, so it falls back

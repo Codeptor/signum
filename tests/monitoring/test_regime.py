@@ -5,7 +5,6 @@ import pytest
 
 from python.monitoring.regime import (
     RegimeDetector,
-    RegimeState,
     _extract_close_series,
 )
 

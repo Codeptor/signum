@@ -11,6 +11,7 @@ Runs the full pipeline daily:
 Schedule: run daily ~15 min before market close, or keep running in a loop.
 """
 
+import json
 import logging
 import logging.handlers
 import os
@@ -18,21 +19,18 @@ import signal
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 
-import json
-from pathlib import Path
-
-from python.alpha.predict import get_ml_weights
 from python.alpha.features import get_current_atr
+from python.alpha.predict import get_ml_weights
 from python.bridge.execution import ExecutionBridge
 from python.brokers.alpaca_broker import AlpacaBroker
 from python.brokers.base import BrokerOrder
-from python.monitoring.drift import DriftDetector
-from python.portfolio.risk_manager import RiskLimits, RiskManager
-from python.data.sectors import SECTOR_MAP, DEFAULT_MAX_SECTOR_WEIGHT
+from python.data.sectors import DEFAULT_MAX_SECTOR_WEIGHT, SECTOR_MAP
 from python.monitoring.regime import RegimeDetector, RegimeState, fetch_spy_drawdown, fetch_vix
+from python.portfolio.risk_manager import RiskLimits, RiskManager
 
 # --- Logging with rotation (Fix #36) ---
 _log_formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -579,7 +577,7 @@ def run_trading_cycle(
 
     if not target_weights:
         logger.error("No tradeable tickers remaining — skipping cycle")
-        _send_alert(f"[LiveBot] No tradeable tickers after price filtering")
+        _send_alert("[LiveBot] No tradeable tickers after price filtering")
         return False
 
     # 4. Sync execution bridge with current account/positions from broker

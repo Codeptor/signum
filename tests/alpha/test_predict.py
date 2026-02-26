@@ -123,6 +123,7 @@ class TestMaxWeightPassthrough:
     def test_optimize_weights_accepts_max_weight(self):
         """optimize_weights signature accepts max_weight parameter."""
         import inspect
+
         from python.alpha.predict import optimize_weights
 
         sig = inspect.signature(optimize_weights)
@@ -133,6 +134,7 @@ class TestMaxWeightPassthrough:
     def test_get_ml_weights_accepts_max_weight(self):
         """get_ml_weights signature accepts max_weight parameter."""
         import inspect
+
         from python.alpha.predict import get_ml_weights
 
         sig = inspect.signature(get_ml_weights)
@@ -149,7 +151,8 @@ class TestComputeFeaturesIncludesMacro:
 
     def test_compute_features_attempts_macro_merge(self, monkeypatch):
         """compute_features should attempt to merge macro features when file exists."""
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
+
         import python.alpha.predict as predict_mod
 
         # We mock the entire chain since we can't easily create valid long_df
@@ -160,10 +163,10 @@ class TestComputeFeaturesIncludesMacro:
         monkeypatch.setattr(predict_mod, "compute_cross_sectional_features", mock_compute_cross)
 
         # Mock Path.exists to say macro file exists
-        with patch("python.alpha.predict.Path") as MockPath:
+        with patch("python.alpha.predict.Path") as mock_path_cls:
             mock_path_instance = MagicMock()
             mock_path_instance.exists.return_value = True
-            MockPath.return_value = mock_path_instance
+            mock_path_cls.return_value = mock_path_instance
 
             with patch("python.alpha.features.merge_macro_features") as mock_merge:
                 mock_merge.return_value = mock_compute_cross.return_value
@@ -177,9 +180,10 @@ class TestRankStocksFillsMissingFeatures:
 
     def test_missing_features_are_filled(self):
         """rank_stocks should not crash when model expects features not in data."""
-        import pandas as pd
-        import numpy as np
         from unittest.mock import MagicMock
+
+        import numpy as np
+        import pandas as pd
 
         from python.alpha.predict import rank_stocks
 
@@ -215,9 +219,10 @@ class TestNeutralDefaults:
 
     def test_vix_filled_with_neutral_default(self):
         """Missing 'vix' should be filled with ~20.0 (long-run median), not 0.0."""
+        from unittest.mock import MagicMock
+
         import numpy as np
         import pandas as pd
-        from unittest.mock import MagicMock
 
         from python.alpha.features import FEATURE_NEUTRAL_DEFAULTS
         from python.alpha.predict import rank_stocks
@@ -241,9 +246,10 @@ class TestNeutralDefaults:
 
     def test_rsi_filled_with_midpoint(self):
         """Missing 'rsi_14' should be filled with 50.0, not 0.0."""
+        from unittest.mock import MagicMock
+
         import numpy as np
         import pandas as pd
-        from unittest.mock import MagicMock
 
         from python.alpha.features import FEATURE_NEUTRAL_DEFAULTS
         from python.alpha.predict import rank_stocks
@@ -264,9 +270,10 @@ class TestNeutralDefaults:
 
     def test_unknown_feature_falls_back_to_zero(self):
         """Features not in FEATURE_NEUTRAL_DEFAULTS fall back to 0.0."""
+        from unittest.mock import MagicMock
+
         import numpy as np
         import pandas as pd
-        from unittest.mock import MagicMock
 
         from python.alpha.predict import rank_stocks
 
@@ -290,8 +297,9 @@ class TestOptimizeWeightsPriceDataPassthrough:
 
     def test_price_data_skips_fetch(self, monkeypatch):
         """When price_data is provided, fetch_ohlcv should NOT be called."""
+        from unittest.mock import MagicMock
+
         import pandas as pd
-        from unittest.mock import MagicMock, patch
 
         import python.alpha.predict as predict_mod
 
@@ -336,8 +344,9 @@ class TestOptimizeWeightsPriceDataPassthrough:
 
     def test_no_price_data_triggers_fetch(self, monkeypatch):
         """When price_data is None, fetch_ohlcv SHOULD be called."""
-        import pandas as pd
         from unittest.mock import MagicMock
+
+        import pandas as pd
 
         import python.alpha.predict as predict_mod
 
@@ -375,6 +384,7 @@ class TestRandomSampleTraining:
     def test_signature_accepts_training_tickers(self):
         """train_model accepts training_tickers override."""
         import inspect
+
         from python.alpha.predict import train_model
 
         sig = inspect.signature(train_model)
@@ -440,15 +450,15 @@ class TestSurvivorshipBiasWarning:
         )
 
         # Short-circuit: raise after the survivorship warning is already logged
-        class _StopEarly(Exception):
+        class _StopEarlyError(Exception):
             pass
 
         monkeypatch.setattr(
-            predict_mod, "fetch_ohlcv", lambda *a, **kw: (_ for _ in ()).throw(_StopEarly)
+            predict_mod, "fetch_ohlcv", lambda *a, **kw: (_ for _ in ()).throw(_StopEarlyError)
         )
 
         with caplog.at_level(logging.WARNING, logger="python.alpha.predict"):
-            with pytest.raises(_StopEarly):
+            with pytest.raises(_StopEarlyError):
                 predict_mod.train_model(force_retrain=True)
 
         assert any("SURVIVORSHIP BIAS" in rec.message for rec in caplog.records), (

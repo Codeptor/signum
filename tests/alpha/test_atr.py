@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from python.alpha.features import compute_atr, _compute_atr_single
+from python.alpha.features import _compute_atr_single, compute_atr
 
 
 @pytest.fixture

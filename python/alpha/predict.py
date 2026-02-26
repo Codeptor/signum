@@ -342,7 +342,6 @@ def rank_stocks(
     latest = featured_df.loc[latest_date].copy()
 
     # Check which model features are available vs missing
-    available_cols = [c for c in model.feature_cols if c in latest.columns]
     missing_cols = [c for c in model.feature_cols if c not in latest.columns]
 
     if missing_cols:

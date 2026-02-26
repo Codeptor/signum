@@ -8,10 +8,8 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from python.data.ingestion import extract_close_prices, reshape_ohlcv_wide_to_long
-
 
 # ---------------------------------------------------------------------------
 # Helpers to build synthetic yfinance-style DataFrames

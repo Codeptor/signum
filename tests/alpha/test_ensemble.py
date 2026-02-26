@@ -6,7 +6,6 @@ import pytest
 
 from python.alpha.ensemble import DEFAULT_WEIGHTS, ModelEnsemble
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

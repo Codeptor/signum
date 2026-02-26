@@ -17,7 +17,7 @@ import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import ElasticNet
 
-from python.alpha.model import CrossSectionalModel, DEFAULT_SEED
+from python.alpha.model import DEFAULT_SEED, CrossSectionalModel
 
 logger = logging.getLogger(__name__)
 

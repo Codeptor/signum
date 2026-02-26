@@ -18,15 +18,12 @@ Validates:
 
 from __future__ import annotations
 
-import time
 from types import SimpleNamespace
-from typing import Dict, List, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from python.brokers.base import BrokerAccount, BrokerOrder, BrokerPosition
-
 
 # ---------------------------------------------------------------------------
 # Helpers to build a fake alpaca_trade_api module
@@ -92,8 +89,8 @@ def _make_alpaca_clock(is_open=True):
     )
 
 
-def _make_alpaca_bar(t="2026-02-25", o=145, h=152, l=144, c=150, v=1_000_000):
-    return SimpleNamespace(t=t, o=o, h=h, l=l, c=c, v=v)
+def _make_alpaca_bar(t="2026-02-25", o=145, h=152, lo=144, c=150, v=1_000_000):
+    return SimpleNamespace(t=t, o=o, h=h, l=lo, c=c, v=v)
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +336,7 @@ class TestClientOrderIdIdempotency:
     def test_changes_across_days(self):
         """When the date changes, the id changes."""
         from datetime import date as real_date
+
         from python.brokers.alpaca_broker import AlpacaBroker
 
         order = BrokerOrder(symbol="AAPL", side="buy", qty=10, order_type="market")

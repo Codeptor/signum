@@ -4,8 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from python.backtest.validation import purged_kfold_split, purged_kfold_cv
-
+from python.backtest.validation import purged_kfold_cv, purged_kfold_split
 
 # ---------------------------------------------------------------------------
 # Tests: purged_kfold_split

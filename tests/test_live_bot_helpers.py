@@ -7,14 +7,10 @@ from __future__ import annotations
 
 import json
 import os
-import unittest.mock
-from datetime import datetime, timezone, timedelta
-from unittest.mock import patch, MagicMock
+from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock, patch
 
 import pytest
-
-from python.brokers.base import BrokerOrder
-
 
 # ===========================================================================
 # _verify_order_fill — timeout path (the only untested branch)
@@ -29,7 +25,7 @@ class TestVerifyOrderFillTimeout:
     @patch("time.sleep", return_value=None)
     def test_timeout_when_order_stays_open(self, _sleep):
         """Order that never reaches terminal state returns 'timeout'."""
-        from examples.live_bot import _verify_order_fill, ORDER_POLL_TIMEOUT_SECS
+        from examples.live_bot import _verify_order_fill
 
         # Create a mock broker where get_order always returns 'new'
         mock_broker = MagicMock()
@@ -62,9 +58,9 @@ class TestVerifyOrderFillTimeout:
     def test_timeout_fills_just_before_deadline(self, _sleep):
         """Order that fills on the last poll before timeout should return 'filled'."""
         from examples.live_bot import (
-            _verify_order_fill,
             ORDER_POLL_INTERVAL_SECS,
             ORDER_POLL_TIMEOUT_SECS,
+            _verify_order_fill,
         )
 
         # Calculate number of polls: timeout / interval
@@ -404,9 +400,10 @@ class TestSigtermHandler:
 
     @patch("examples.live_bot.signal.signal")
     @patch("examples.live_bot.AlpacaBroker")
-    def test_sigterm_handler_registered(self, MockAlpacaBroker, mock_signal):
+    def test_sigterm_handler_registered(self, mock_alpaca_broker, mock_signal):
         """Verify signal.signal(SIGTERM, handler) is called in main()."""
         import signal as signal_mod
+
         from examples.live_bot import main
 
         # Mock broker so main() doesn't actually run a trading loop
@@ -415,7 +412,7 @@ class TestSigtermHandler:
         mock_broker_instance.get_account.return_value = MagicMock(equity=100000.0, cash=50000.0)
         mock_broker_instance.get_clock.return_value = {"is_open": False, "next_open": None}
         mock_broker_instance.list_positions.return_value = []
-        MockAlpacaBroker.return_value = mock_broker_instance
+        mock_alpaca_broker.return_value = mock_broker_instance
 
         # Patch environment variables for main (note: correct env var names)
         with (
@@ -460,7 +457,7 @@ class TestDrawdownKillSwitch:
         _should_rebal,
         _sleep,
     ):
-        """When risk_manager reports MAX_DRAWDOWN critical violation, _liquidate_all_positions is called."""
+        """MAX_DRAWDOWN violation triggers _liquidate_all_positions."""
         from examples.live_bot import _liquidate_all_positions
         from python.portfolio.risk_manager import RiskCheck
 
