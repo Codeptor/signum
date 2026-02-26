@@ -485,6 +485,11 @@ class TestDrawdownKillSwitch:
             MagicMock(symbol="AAPL", qty=10.0),
             MagicMock(symbol="MSFT", qty=5.0),
         ]
+        # H2 fix: _liquidate_all_positions now verifies fills via get_order
+        mock_broker.submit_order.return_value = "order-123"
+        mock_broker.get_order.return_value = MagicMock(
+            status="filled", filled_qty=10.0, filled_avg_price=150.0, qty=10.0,
+        )
 
         n_liquidated = _liquidate_all_positions(mock_broker)
 

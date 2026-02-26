@@ -326,15 +326,32 @@ class TestClientOrderIdIdempotency:
         o2 = BrokerOrder(symbol="AAPL", side="buy", qty=20, order_type="market")
         assert AlpacaBroker._make_client_order_id(o1) != AlpacaBroker._make_client_order_id(o2)
 
-    def test_changes_across_minutes(self):
-        """When the minute-resolution timestamp changes, the id changes."""
+    def test_same_day_same_id(self):
+        """Same order on same day produces same id (C5 fix: day-level idempotency)."""
         from python.brokers.alpaca_broker import AlpacaBroker
 
         order = BrokerOrder(symbol="AAPL", side="buy", qty=10, order_type="market")
 
-        with patch("time.time", return_value=60 * 100):
+        id1 = AlpacaBroker._make_client_order_id(order)
+        id2 = AlpacaBroker._make_client_order_id(order)
+        assert id1 == id2
+
+    def test_changes_across_days(self):
+        """When the date changes, the id changes."""
+        from datetime import date as real_date
+        from python.brokers.alpaca_broker import AlpacaBroker
+
+        order = BrokerOrder(symbol="AAPL", side="buy", qty=10, order_type="market")
+
+        # Patch date.today() at the module level where it's imported
+        fake_date_1 = MagicMock(wraps=real_date)
+        fake_date_1.today.return_value = real_date(2026, 1, 1)
+        fake_date_2 = MagicMock(wraps=real_date)
+        fake_date_2.today.return_value = real_date(2026, 1, 2)
+
+        with patch("datetime.date", fake_date_1):
             id1 = AlpacaBroker._make_client_order_id(order)
-        with patch("time.time", return_value=60 * 101):
+        with patch("datetime.date", fake_date_2):
             id2 = AlpacaBroker._make_client_order_id(order)
         assert id1 != id2
 

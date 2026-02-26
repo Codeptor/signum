@@ -191,14 +191,18 @@ class TestRunTradingCycleIntegration:
         buy_symbols = {o.symbol for o in broker.submitted_orders if o.side == "buy"}
         assert buy_symbols == {"AAPL", "MSFT", "GOOG"}
 
-        # Every buy should also generate SL + TP orders (2 extra per buy = 6 total SL/TP)
-        sl_tp_orders = [
+        # C1 fix: SL+TP are now submitted as OCO pairs (1 order per buy, not 2)
+        oco_orders = [
             o
             for o in broker.submitted_orders
-            if o.order_type in ("stop", "limit") and o.side == "sell"
+            if o.order_class == "oco" and o.side == "sell"
         ]
-        # 3 SL + 3 TP = 6
-        assert len(sl_tp_orders) == 6
+        # 3 buys = 3 OCO orders (each contains SL + TP)
+        assert len(oco_orders) == 3
+        # Each OCO should have both a limit price (TP) and stop_loss_stop_price (SL)
+        for oco in oco_orders:
+            assert oco.limit_price is not None, f"OCO for {oco.symbol} missing TP limit_price"
+            assert oco.stop_loss_stop_price is not None, f"OCO for {oco.symbol} missing SL stop_price"
 
     @patch("examples.live_bot.get_ml_weights")
     @patch("time.sleep", return_value=None)
@@ -323,15 +327,15 @@ class TestRunTradingCycleIntegration:
         # when the new MSFT buy fills and fresh SL/TP orders are attached.
         assert "order-sl-child" in broker.cancelled_order_ids
 
-        # Verify new SL/TP orders were submitted for MSFT after the buy fill
+        # C1 fix: SL+TP now submitted as single OCO order (not separate stop + limit)
         msft_sell_orders = [
             o for o in broker.submitted_orders if o.symbol == "MSFT" and o.side == "sell"
         ]
-        # Should have at least a new stop-loss and take-profit
-        sl_orders = [o for o in msft_sell_orders if o.order_type == "stop"]
-        tp_orders = [o for o in msft_sell_orders if o.order_type == "limit"]
-        assert len(sl_orders) >= 1, "Expected new SL order for MSFT after buy fill"
-        assert len(tp_orders) >= 1, "Expected new TP order for MSFT after buy fill"
+        oco_orders = [o for o in msft_sell_orders if o.order_class == "oco"]
+        assert len(oco_orders) >= 1, "Expected new OCO SL/TP order for MSFT after buy fill"
+        # The OCO order contains both TP (limit_price) and SL (stop_loss_stop_price)
+        assert oco_orders[0].limit_price is not None, "OCO missing TP limit_price"
+        assert oco_orders[0].stop_loss_stop_price is not None, "OCO missing SL stop_price"
 
     @patch("examples.live_bot.get_ml_weights")
     @patch("time.sleep", return_value=None)
@@ -451,20 +455,19 @@ class TestSLTPAttachment:
 
         run_trading_cycle(broker, risk_manager, bridge)
 
-        # Find the SL and TP orders
-        stop_orders = [o for o in broker.submitted_orders if o.order_type == "stop"]
-        limit_orders = [
-            o for o in broker.submitted_orders if o.order_type == "limit" and o.side == "sell"
+        # C1 fix: SL+TP are now submitted as OCO pair (single order)
+        oco_orders = [
+            o for o in broker.submitted_orders
+            if o.order_class == "oco" and o.side == "sell"
         ]
-
-        assert len(stop_orders) == 1
-        assert len(limit_orders) == 1
+        assert len(oco_orders) == 1
 
         expected_sl = round(fill_price - (ATR_SL_MULTIPLIER * atr_value), 2)
         expected_tp = round(fill_price + (ATR_TP_MULTIPLIER * atr_value), 2)
 
-        assert stop_orders[0].stop_price == expected_sl
-        assert limit_orders[0].limit_price == expected_tp
+        # OCO order has TP as limit_price and SL as stop_loss_stop_price
+        assert oco_orders[0].stop_loss_stop_price == expected_sl
+        assert oco_orders[0].limit_price == expected_tp
 
     @patch("examples.live_bot.get_ml_weights")
     @patch("time.sleep", return_value=None)

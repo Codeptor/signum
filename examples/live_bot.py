@@ -114,10 +114,12 @@ def _get_next_rebalance_date() -> datetime:
 
 
 def _liquidate_all_positions(broker: AlpacaBroker) -> int:
-    """Close all open positions. Returns the number of liquidation orders submitted.
+    """Close all open positions. Returns the number of confirmed liquidation fills.
 
     Used during regime halt and drawdown kill-switch events.
     Cancels all open orders first to prevent interference.
+
+    H2 fix: verifies each liquidation fill instead of fire-and-forget.
     """
     try:
         # Cancel all open orders first
@@ -130,7 +132,7 @@ def _liquidate_all_positions(broker: AlpacaBroker) -> int:
         logger.info("No positions to liquidate.")
         return 0
 
-    submitted = 0
+    submitted = []
     for pos in positions:
         try:
             side = "sell" if pos.qty > 0 else "buy"
@@ -142,15 +144,35 @@ def _liquidate_all_positions(broker: AlpacaBroker) -> int:
                 order_type="market",
                 time_in_force="day",
             )
-            broker.submit_order(order)
-            submitted += 1
+            order_id = broker.submit_order(order)
+            submitted.append({"order_id": order_id, "symbol": pos.symbol, "qty": qty})
             logger.info(f"  Liquidating: {side.upper()} {qty:.4f} {pos.symbol}")
         except Exception as e:
             logger.error(f"  Failed to liquidate {pos.symbol}: {e}")
 
-    logger.info(f"Liquidation complete: {submitted}/{len(positions)} orders submitted.")
-    _send_alert(f"[LiveBot] Liquidated {submitted} positions due to emergency condition.")
-    return submitted
+    # H2 fix: verify each liquidation fill
+    confirmed = 0
+    for entry in submitted:
+        result = _verify_order_fill(broker, entry["order_id"], entry["symbol"], entry["qty"])
+        if result["status"] in ("filled", "partially_filled"):
+            confirmed += 1
+            logger.info(f"  Liquidation confirmed: {entry['symbol']} ({result['status']})")
+        else:
+            logger.error(
+                f"  Liquidation NOT confirmed: {entry['symbol']} — status={result['status']}. "
+                f"MANUAL INTERVENTION MAY BE REQUIRED."
+            )
+            _send_alert(
+                f"[LiveBot] WARNING: Liquidation of {entry['symbol']} not confirmed "
+                f"(status={result['status']}). Check manually!"
+            )
+
+    logger.info(
+        f"Liquidation complete: {confirmed}/{len(submitted)} fills confirmed "
+        f"out of {len(positions)} positions."
+    )
+    _send_alert(f"[LiveBot] Liquidated {confirmed} positions due to emergency condition.")
+    return confirmed
 
 
 def _send_alert(message: str) -> None:
@@ -335,11 +357,17 @@ def _load_bot_state() -> dict:
 
 
 def _save_bot_state(state: dict) -> None:
-    """Persist bot state to disk."""
+    """Persist bot state to disk.
+
+    H1 fix: atomic write via temp file + rename. A crash during write
+    can't corrupt the state file because rename is atomic on POSIX.
+    """
     try:
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(STATE_FILE, "w") as f:
+        tmp = STATE_FILE.with_suffix(".tmp")
+        with open(tmp, "w") as f:
             json.dump(state, f, indent=2)
+        tmp.replace(STATE_FILE)  # Atomic rename
     except Exception as e:
         logger.warning(f"Could not save bot state: {e}")
 
@@ -349,13 +377,18 @@ def _has_traded_today(broker: AlpacaBroker) -> bool:
 
     Prevents duplicate execution on restart by checking for recent orders
     from the current trading session.
+
+    C2 fix: created_at may be a datetime or string — normalize to string.
+    M1 fix: use UTC date to match Alpaca's UTC timestamps.
     """
     try:
+        from datetime import timezone
+
         # Get all orders (including closed)
         orders = broker.list_orders(status="all")
 
-        # Filter to non-cancelled orders from today
-        today = datetime.now().strftime("%Y-%m-%d")
+        # M1 fix: use UTC date to match Alpaca order timestamps
+        today_utc = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
         executed_today = [
             o
             for o in orders
@@ -363,7 +396,7 @@ def _has_traded_today(broker: AlpacaBroker) -> bool:
             and o.order_id
             and hasattr(o, "created_at")
             and o.created_at
-            and o.created_at.startswith(today)
+            and str(o.created_at).startswith(today_utc)  # C2 fix: str() handles datetime
         ]
 
         if executed_today:
@@ -534,10 +567,15 @@ def run_trading_cycle(
     if failed_tickers:
         logger.warning(f"Removing tickers with no price data: {failed_tickers}")
         target_weights = {t: w for t, w in target_weights.items() if t in prices}
-        # Renormalize
+        # Renormalize, then clamp to MAX_POSITION_WEIGHT (M2 fix)
         total = sum(target_weights.values())
         if total > 0:
             target_weights = {t: w / total for t, w in target_weights.items()}
+            # M2 fix: renormalization can push individual weights above the cap
+            clamped = {t: min(w, MAX_POSITION_WEIGHT) for t, w in target_weights.items()}
+            if clamped != target_weights:
+                logger.info("Clamped renormalized weights to MAX_POSITION_WEIGHT")
+                target_weights = clamped
 
     if not target_weights:
         logger.error("No tradeable tickers remaining — skipping cycle")
@@ -651,8 +689,8 @@ def run_trading_cycle(
                 )
 
             # Attach SL/TP orders anchored to actual fill price (Fix #33)
-            # Phase 2: Use ATR-based stops instead of fixed percentages
-            # Use actual filled qty (not intended qty) for protective order sizing
+            # C1 fix: submit as OCO pair so one filling cancels the other
+            # C4 fix: size SL/TP for TOTAL position, not just this fill increment
             if (
                 entry.get("needs_sl_tp")
                 and result["filled_avg_price"] is not None
@@ -665,18 +703,23 @@ def run_trading_cycle(
 
                     fill_price = float(result["filled_avg_price"])
 
+                    # C4 fix: get total position qty from broker for SL/TP sizing
+                    try:
+                        total_pos = broker.get_position(entry["symbol"])
+                        sl_tp_qty = round(abs(total_pos.qty), 4) if total_pos else actual_qty
+                    except Exception:
+                        sl_tp_qty = actual_qty
+
                     # Try ATR-based stops first, fall back to fixed %
                     atr = get_current_atr(entry["symbol"])
                     if atr is not None and atr > 0:
                         sl_price = round(fill_price - (ATR_SL_MULTIPLIER * atr), 2)
                         tp_price = round(fill_price + (ATR_TP_MULTIPLIER * atr), 2)
                         sl_label = f"{ATR_SL_MULTIPLIER}x ATR ({atr:.2f})"
-                        tp_label = f"{ATR_TP_MULTIPLIER}x ATR ({atr:.2f})"
                     else:
                         sl_price = round(fill_price * (1 - STOP_LOSS_PCT), 2)
                         tp_price = round(fill_price * (1 + TAKE_PROFIT_PCT), 2)
                         sl_label = f"{STOP_LOSS_PCT:.0%} fixed (ATR unavailable)"
-                        tp_label = f"{TAKE_PROFIT_PCT:.0%} fixed (ATR unavailable)"
 
                     # Sanity: SL must be below fill, TP must be above
                     if sl_price >= fill_price:
@@ -684,39 +727,44 @@ def run_trading_cycle(
                         sl_label = f"{STOP_LOSS_PCT:.0%} fixed (ATR sanity fallback)"
                     if tp_price <= fill_price:
                         tp_price = round(fill_price * (1 + TAKE_PROFIT_PCT), 2)
-                        tp_label = f"{TAKE_PROFIT_PCT:.0%} fixed (ATR sanity fallback)"
 
-                    # Submit stop-loss (use actual filled qty, not intended)
-                    sl_order = BrokerOrder(
+                    # C1 fix: submit SL+TP as OCO pair (one-cancels-other).
+                    # When SL fills, TP is automatically cancelled (and vice versa),
+                    # preventing orphaned orders from creating naked short positions.
+                    oco_order = BrokerOrder(
                         symbol=entry["symbol"],
                         side="sell",
-                        qty=actual_qty,
-                        order_type="stop",
-                        stop_price=sl_price,
-                        time_in_force="gtc",
-                    )
-                    sl_id = broker.submit_order(sl_order)
-                    logger.info(
-                        f"    SL attached: SELL {actual_qty:.4f} {entry['symbol']} @ ${sl_price} "
-                        f"({sl_label} from fill ${fill_price:.2f}) -> {sl_id}"
-                    )
-
-                    # Submit take-profit (use actual filled qty, not intended)
-                    tp_order = BrokerOrder(
-                        symbol=entry["symbol"],
-                        side="sell",
-                        qty=actual_qty,
+                        qty=sl_tp_qty,
                         order_type="limit",
                         limit_price=tp_price,
                         time_in_force="gtc",
+                        order_class="oco",
+                        stop_loss_stop_price=sl_price,
                     )
-                    tp_id = broker.submit_order(tp_order)
+                    oco_id = broker.submit_order(oco_order)
                     logger.info(
-                        f"    TP attached: SELL {entry['symbol']} @ ${tp_price} "
-                        f"({tp_label} from fill ${fill_price:.2f}) -> {tp_id}"
+                        f"    OCO SL/TP attached: SELL {sl_tp_qty:.4f} {entry['symbol']} "
+                        f"SL@${sl_price} ({sl_label}) TP@${tp_price} "
+                        f"(from fill ${fill_price:.2f}) -> {oco_id}"
                     )
                 except Exception as e:
                     logger.error(f"    Failed to attach SL/TP for {entry['symbol']}: {e}")
+                    # Fallback: submit at least a stop-loss (better than nothing)
+                    try:
+                        sl_order = BrokerOrder(
+                            symbol=entry["symbol"],
+                            side="sell",
+                            qty=sl_tp_qty if 'sl_tp_qty' in dir() else actual_qty,
+                            order_type="stop",
+                            stop_price=sl_price if 'sl_price' in dir() else round(
+                                float(result["filled_avg_price"]) * (1 - STOP_LOSS_PCT), 2
+                            ),
+                            time_in_force="gtc",
+                        )
+                        broker.submit_order(sl_order)
+                        logger.info(f"    SL-only fallback attached for {entry['symbol']}")
+                    except Exception as e2:
+                        logger.error(f"    SL fallback also failed: {e2}")
             elif entry.get("needs_sl_tp") and actual_qty > 0:
                 logger.warning(
                     f"    No fill price available for {entry['symbol']} — "
@@ -805,8 +853,8 @@ def main():
     logger.info(f"  Max drawdown: {MAX_DRAWDOWN_LIMIT:.0%}")
     logger.info("=" * 60)
 
-    # Paper trading — set to False only after thorough testing
-    paper_trading = True
+    # M3 fix: paper_trading from env var (default True for safety)
+    paper_trading = os.getenv("LIVE_TRADING", "").lower() != "true"
 
     api_key = os.getenv("ALPACA_API_KEY")
     api_secret = os.getenv("ALPACA_API_SECRET")
@@ -826,17 +874,26 @@ def main():
         sys.exit(1)
 
     # --- SIGTERM handler (H4): persist state on container/systemd kill ---
-    # Without this, a SIGTERM (docker stop, systemd stop, kill) would exit
-    # without saving state or disconnecting from the broker.
+    # C3 fix: Save comprehensive state including positions and trade tracking,
+    # not just equity. Use nonlocal-safe pattern for bridge reference.
+    _bridge_ref = [None]  # Mutable container accessible from closure
+
     def _handle_sigterm(signum, frame):
         logger.info(f"Received signal {signum} (SIGTERM) — initiating graceful shutdown...")
-        _save_bot_state(
-            {
-                "last_shutdown": datetime.now().isoformat(),
-                "final_equity": bridge.equity if "bridge" in dir() else None,
-                "reason": "sigterm",
+        bridge_obj = _bridge_ref[0]
+        state = {
+            "last_shutdown": datetime.now().isoformat(),
+            "reason": "sigterm",
+        }
+        if bridge_obj is not None:
+            state["final_equity"] = bridge_obj.equity
+            state["positions"] = {
+                t: {"qty": p.quantity, "avg_cost": p.avg_cost}
+                for t, p in bridge_obj.positions.items()
+                if p.quantity != 0
             }
-        )
+            state["cash"] = bridge_obj.cash
+        _save_bot_state(state)
         _send_alert("[LiveBot] Received SIGTERM — shutting down gracefully.")
         broker.disconnect()
         logger.info("SIGTERM shutdown complete.")
@@ -875,6 +932,7 @@ def main():
     # history across cycles. Each cycle syncs positions/equity from broker.
     account = broker.get_account()
     bridge = ExecutionBridge(risk_manager=risk_manager, initial_capital=account.equity)
+    _bridge_ref[0] = bridge  # C3 fix: make bridge accessible to SIGTERM handler
 
     try:
         while True:

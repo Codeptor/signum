@@ -190,12 +190,14 @@ class BaseBroker(ABC):
         current_positions = {p.symbol: p.qty for p in self.list_positions()}
 
         # Close positions not in target weights (stale positions)
+        # M10 fix: handle short positions (negative qty) too
         for symbol, qty in current_positions.items():
-            if qty > 1e-6 and symbol not in target_weights:
+            if abs(qty) > 1e-6 and symbol not in target_weights:
+                side = "sell" if qty > 0 else "buy"
                 order = BrokerOrder(
                     symbol=symbol,
-                    side="sell",
-                    qty=qty,
+                    side=side,
+                    qty=abs(qty),
                     order_type="market",
                 )
                 try:

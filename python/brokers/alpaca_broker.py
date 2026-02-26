@@ -111,13 +111,15 @@ class AlpacaBroker(BaseBroker):
     def _make_client_order_id(order: BrokerOrder) -> str:
         """Generate a deterministic client_order_id to prevent duplicate orders.
 
-        Uses symbol + side + qty + order_type + minute-resolution timestamp so
-        that an identical order submitted within the same minute is idempotent.
+        Uses symbol + side + qty + order_type + date so that an identical order
+        submitted on the same trading day is idempotent. Day-level granularity
+        prevents minute-boundary races (C5 fix) where a retry at :00 would
+        generate a different ID than the original at :59.
         """
-        import time
+        from datetime import date
 
-        minute_ts = int(time.time()) // 60
-        raw = f"{order.symbol}|{order.side}|{order.qty}|{order.order_type}|{minute_ts}"
+        day_str = date.today().isoformat()
+        raw = f"{order.symbol}|{order.side}|{order.qty}|{order.order_type}|{day_str}"
         return hashlib.sha256(raw.encode()).hexdigest()[:24]
 
     def disconnect(self) -> None:
@@ -310,7 +312,11 @@ class AlpacaBroker(BaseBroker):
                         float(o.filled_avg_price) if getattr(o, "filled_avg_price", None) else None
                     ),
                     filled_qty=(float(o.filled_qty) if getattr(o, "filled_qty", None) else None),
-                    created_at=getattr(o, "created_at", None),
+                    created_at=(
+                        str(getattr(o, "created_at", ""))
+                        if getattr(o, "created_at", None)
+                        else None
+                    ),
                 )
                 for o in orders
             ]
@@ -334,8 +340,11 @@ class AlpacaBroker(BaseBroker):
                 unrealized_pl=float(position.unrealized_pl),
                 unrealized_plpc=float(position.unrealized_plpc),
             )
-        except Exception:
-            # Position might not exist
+        except Exception as e:
+            err_str = str(e).lower()
+            if "position does not exist" in err_str or "not found" in err_str or "404" in err_str:
+                return None
+            logger.error(f"Unexpected error getting position for {symbol}: {e}")
             return None
 
     @_retry_read

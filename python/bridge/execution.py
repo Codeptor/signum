@@ -173,9 +173,21 @@ class ExecutionBridge:
         """
         # Validate through risk manager
         if self.risk_manager is not None:
-            # Calculate weight
+            # C6 fix: calculate TARGET POSITION weight, not trade size weight.
+            # Previously passed trade size as weight, making all risk checks
+            # ineffective (e.g. a 5% top-up would pass the 30% position limit
+            # even if the resulting position was 35%).
             portfolio_value = self.equity
-            weight = (quantity * current_price) / portfolio_value if portfolio_value > 0 else 0
+            if portfolio_value > 0:
+                existing_pos = self.get_position(ticker)
+                existing_value = existing_pos.quantity * current_price
+                if side == "BUY":
+                    target_value = existing_value + (quantity * current_price)
+                else:
+                    target_value = existing_value - (quantity * current_price)
+                weight = target_value / portfolio_value
+            else:
+                weight = 0
 
             can_execute, issues = self.risk_manager.can_execute_trade(
                 ticker=ticker,
@@ -225,6 +237,17 @@ class ExecutionBridge:
             logger.warning(f"Insufficient cash for {order.ticker} buy order")
             return None
 
+        # M7 fix: check if sell would open a short (sell more than we hold)
+        if order.side == "SELL":
+            current_pos = self.get_position(order.ticker) if hasattr(self, 'positions') else None
+            current_qty = current_pos.quantity if current_pos else 0
+            if order.quantity > current_qty:
+                # This sell would open a short — need margin/cash for it
+                short_value = (order.quantity - current_qty) * current_price
+                if short_value + commission > self.cash:
+                    logger.warning(f"Insufficient cash for {order.ticker} short sell")
+                    return None
+
         fill = Fill(
             order=order,
             fill_price=current_price,
@@ -271,8 +294,11 @@ class ExecutionBridge:
             positions_value += pos.market_value(price)
         self.equity = self.cash + positions_value
 
-        # Record equity curve point
+        # Record equity curve point (M6 fix: cap at 10k entries to prevent unbounded growth)
         self.equity_curve.append({"timestamp": datetime.now(), "equity": self.equity})
+        if len(self.equity_curve) > 10_000:
+            # Keep every 10th historical point + last 1000
+            self.equity_curve = self.equity_curve[::10][:-100] + self.equity_curve[-1000:]
 
     def update_prices(self, prices: Dict[str, float]) -> None:
         """Update positions with current prices."""

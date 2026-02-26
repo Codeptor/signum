@@ -121,28 +121,32 @@ class RiskManager:
         checks = []
         date_key = current_date or pd.Timestamp.now().strftime("%Y-%m-%d")
 
+        # C7/C8 fix: use absolute weight for limit checks so short positions
+        # are validated the same as longs (previously only positive weights checked)
+        abs_weight = abs(new_weight)
+
         # 1. Position size limit
-        if new_weight > self.limits.max_position_weight:
+        if abs_weight > self.limits.max_position_weight:
             checks.append(
                 RiskCheck(
                     passed=False,
                     rule="MAX_POSITION_SIZE",
-                    message=f"Position size {new_weight:.1%} exceeds limit of "
+                    message=f"Position size {abs_weight:.1%} exceeds limit of "
                     f"{self.limits.max_position_weight:.1%}",
                     severity="critical",
-                    metric_value=new_weight,
+                    metric_value=abs_weight,
                     limit_value=self.limits.max_position_weight,
                 )
             )
-        elif new_weight < self.limits.min_position_weight and new_weight > 0:
+        elif abs_weight < self.limits.min_position_weight and abs_weight > 0:
             checks.append(
                 RiskCheck(
                     passed=False,
                     rule="MIN_POSITION_SIZE",
-                    message=f"Position size {new_weight:.1%} below minimum of "
+                    message=f"Position size {abs_weight:.1%} below minimum of "
                     f"{self.limits.min_position_weight:.1%}",
                     severity="warning",
-                    metric_value=new_weight,
+                    metric_value=abs_weight,
                     limit_value=self.limits.min_position_weight,
                 )
             )
@@ -151,7 +155,7 @@ class RiskManager:
                 RiskCheck(
                     passed=True,
                     rule="POSITION_SIZE",
-                    message=f"Position size {new_weight:.1%} within limits",
+                    message=f"Position size {abs_weight:.1%} within limits",
                     severity="info",
                 )
             )
@@ -235,19 +239,22 @@ class RiskManager:
                     )
                 )
 
-        # 4. Leverage check — subtract old weight for this ticker to avoid
-        #    double-counting when updating an existing position (Fix #15).
+        # 4. Leverage check — use absolute weights for gross exposure (C8 fix).
+        #    Subtract old weight for this ticker to avoid double-counting.
         if self.current_weights is not None:
             old_weight = self.current_weights.get(ticker, 0.0)
-            total_weight = self.current_weights.sum() - old_weight + new_weight
-            if total_weight > self.limits.max_leverage:
+            # Gross exposure = sum of absolute weights (longs + shorts)
+            gross_exposure = (
+                self.current_weights.abs().sum() - abs(old_weight) + abs_weight
+            )
+            if gross_exposure > self.limits.max_leverage:
                 checks.append(
                     RiskCheck(
                         passed=False,
                         rule="MAX_LEVERAGE",
-                        message=f"Total exposure {total_weight:.1%} exceeds leverage limit",
+                        message=f"Gross exposure {gross_exposure:.1%} exceeds leverage limit",
                         severity="critical",
-                        metric_value=total_weight,
+                        metric_value=gross_exposure,
                         limit_value=self.limits.max_leverage,
                     )
                 )
@@ -299,12 +306,13 @@ class RiskManager:
 
         return checks
 
-    def check_portfolio_risk(self, returns: pd.Series) -> List[RiskCheck]:
+    def check_portfolio_risk(self, weights: pd.Series) -> List[RiskCheck]:
         """
         Check overall portfolio risk metrics.
 
         Args:
-            returns: Portfolio return series
+            weights: Current portfolio weights (used for context, risk engine
+                     uses its own internal state for calculations).
 
         Returns:
             List of RiskCheck results
@@ -414,6 +422,12 @@ class RiskManager:
         # Skip small weight changes (dust trades)
         if abs(weight_change) < 0.001:
             return
+
+        # M4 fix: prune entries older than 7 days to prevent unbounded growth
+        if len(self.daily_trades) > 30:
+            cutoff = (pd.Timestamp.now() - pd.Timedelta(days=7)).strftime("%Y-%m-%d")
+            self.daily_trades = {k: v for k, v in self.daily_trades.items() if k >= cutoff}
+            self.daily_turnover = {k: v for k, v in self.daily_turnover.items() if k >= cutoff}
 
         # Update trade count
         self.daily_trades[date_key] = self.daily_trades.get(date_key, 0) + 1
