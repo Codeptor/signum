@@ -422,10 +422,13 @@ class TestSigtermHandler:
         mock_alpaca_broker.return_value = mock_broker_instance
 
         # Patch environment variables for main (note: correct env var names)
+        # C-STARTUP fix: exit is now gated behind should_rebalance_today(),
+        # so we must mock it to True for the _has_traded_today guard to fire.
         with (
             patch.dict(
                 os.environ, {"ALPACA_API_KEY": "test-key", "ALPACA_API_SECRET": "test-secret"}
             ),
+            patch("examples.live_bot.should_rebalance_today", return_value=True),
             patch("examples.live_bot._has_traded_today", return_value=True),
             patch("examples.live_bot._load_bot_state", return_value={}),
         ):
@@ -492,7 +495,10 @@ class TestDrawdownKillSwitch:
         # H2 fix: _liquidate_all_positions now verifies fills via get_order
         mock_broker.submit_order.return_value = "order-123"
         mock_broker.get_order.return_value = MagicMock(
-            status="filled", filled_qty=10.0, filled_avg_price=150.0, qty=10.0,
+            status="filled",
+            filled_qty=10.0,
+            filled_avg_price=150.0,
+            qty=10.0,
         )
 
         n_liquidated = _liquidate_all_positions(mock_broker)
@@ -760,7 +766,10 @@ class TestLiquidationFailures:
 
         mock_broker.submit_order.side_effect = submit_side_effect
         mock_broker.get_order.return_value = MagicMock(
-            status="filled", filled_qty=10.0, filled_avg_price=150.0, qty=10.0,
+            status="filled",
+            filled_qty=10.0,
+            filled_avg_price=150.0,
+            qty=10.0,
         )
 
         confirmed = _liquidate_all_positions(mock_broker)
