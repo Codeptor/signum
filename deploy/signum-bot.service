@@ -1,0 +1,42 @@
+[Unit]
+Description=Signum Quant Trading Bot
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=signum
+Group=signum
+WorkingDirectory=/opt/signum
+Environment="PYTHONPATH=/opt/signum"
+EnvironmentFile=/opt/signum/.env
+
+# Start the bot with the launcher script
+ExecStart=/opt/signum/.venv/bin/python /opt/signum/.venv/bin/python examples/live_bot.py
+
+# Restart on failure with backoff
+Restart=on-failure
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=5
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=2G
+CPUQuota=200%
+
+# Logging
+StandardOutput=append:/var/log/signum/signum.log
+StandardError=append:/var/log/signum/signum-error.log
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/signum/data /opt/signum/logs /var/log/signum
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target
