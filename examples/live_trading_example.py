@@ -43,8 +43,8 @@ def main():
         return
 
     try:
-        from python.brokers.alpaca_broker import AlpacaPaperTrading
-        from python.portfolio.risk_manager import RiskLimits, RiskManager
+        from python.brokers.alpaca_broker import AlpacaPaperTrading  # noqa: F401
+        from python.portfolio.risk_manager import RiskLimits, RiskManager  # noqa: F401
     except ImportError as e:
         print(f"Missing dependencies: {e}")
         print("Install with: pip install alpaca-trade-api")

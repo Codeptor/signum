@@ -68,9 +68,7 @@ def _compute_single_ticker(df: pd.DataFrame) -> pd.DataFrame:
     dollar_vol = c * v
     df["dollar_volume_20d"] = dollar_vol.rolling(20).mean()
     df["amihud_illiq"] = (
-        (c.pct_change(fill_method=None).abs() / np.where(dollar_vol != 0, dollar_vol, np.nan))
-        .rolling(20)
-        .mean()
+        (c.pct_change().abs() / np.where(dollar_vol != 0, dollar_vol, np.nan)).rolling(20).mean()
     )
     df["bid_ask_proxy"] = (h - lo) / c  # Corwin-Schultz spread proxy
 
@@ -90,9 +88,7 @@ def compute_forward_returns(df: pd.DataFrame, horizon: int = 5) -> pd.DataFrame:
     results = []
     for ticker, group in df.groupby("ticker"):
         g = group.copy()
-        g[f"target_{horizon}d"] = (
-            g["close"].pct_change(periods=horizon, fill_method=None).shift(-horizon)
-        )
+        g[f"target_{horizon}d"] = g["close"].pct_change(periods=horizon).shift(-horizon)
         results.append(g)
     return pd.concat(results).sort_index()
 

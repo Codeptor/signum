@@ -4,6 +4,8 @@ import logging
 import os
 from typing import Dict, List, Optional
 
+import pandas as pd
+
 from python.brokers.base import (
     BaseBroker,
     BrokerAccount,
@@ -103,26 +105,49 @@ class AlpacaBroker(BaseBroker):
         )
 
     def submit_order(self, order: BrokerOrder) -> str:
-        """Submit an order to Alpaca."""
+        """Submit an order to Alpaca.
+
+        Supports simple orders (market, limit, stop) and bracket orders
+        with attached stop-loss and/or take-profit legs.
+        """
         if not self._connected:
             raise ConnectionError("Not connected to Alpaca. Call connect() first.")
 
         try:
-            alpaca_order = self.api.submit_order(
-                symbol=order.symbol,
-                qty=order.qty,
-                side=order.side,
-                type=order.order_type,
-                time_in_force=order.time_in_force,
-                limit_price=order.limit_price,
-                stop_price=order.stop_price,
-                client_order_id=order.client_order_id,
-            )
+            kwargs = {
+                "symbol": order.symbol,
+                "qty": order.qty,
+                "side": order.side,
+                "type": order.order_type,
+                "time_in_force": order.time_in_force,
+            }
 
-            logger.info(
-                f"Order submitted: {order.side} {order.qty} {order.symbol} "
-                f"@{order.order_type} - ID: {alpaca_order.id}"
-            )
+            if order.limit_price is not None:
+                kwargs["limit_price"] = order.limit_price
+            if order.stop_price is not None:
+                kwargs["stop_price"] = order.stop_price
+            if order.client_order_id is not None:
+                kwargs["client_order_id"] = order.client_order_id
+
+            # Bracket order support
+            if order.order_class:
+                kwargs["order_class"] = order.order_class
+
+                if order.take_profit_limit_price is not None:
+                    kwargs["take_profit"] = {"limit_price": str(order.take_profit_limit_price)}
+
+                if order.stop_loss_stop_price is not None:
+                    stop_loss = {"stop_price": str(order.stop_loss_stop_price)}
+                    if order.stop_loss_limit_price is not None:
+                        stop_loss["limit_price"] = str(order.stop_loss_limit_price)
+                    kwargs["stop_loss"] = stop_loss
+
+            alpaca_order = self.api.submit_order(**kwargs)
+
+            order_desc = f"{order.side} {order.qty} {order.symbol} @{order.order_type}"
+            if order.order_class:
+                order_desc += f" [{order.order_class}]"
+            logger.info(f"Order submitted: {order_desc} - ID: {alpaca_order.id}")
 
             return alpaca_order.id
 
@@ -142,6 +167,20 @@ class AlpacaBroker(BaseBroker):
         except Exception as e:
             logger.error(f"Failed to cancel order {order_id}: {e}")
             return False
+
+    def cancel_all_orders(self) -> int:
+        """Cancel all open orders. Returns count of cancelled orders."""
+        if not self._connected:
+            raise ConnectionError("Not connected to Alpaca. Call connect() first.")
+
+        try:
+            cancelled = self.api.cancel_all_orders()
+            count = len(cancelled) if cancelled else 0
+            logger.info(f"Cancelled {count} open orders")
+            return count
+        except Exception as e:
+            logger.error(f"Failed to cancel all orders: {e}")
+            raise
 
     def get_order(self, order_id: str) -> Optional[BrokerOrder]:
         """Get order status by ID."""
@@ -230,17 +269,87 @@ class AlpacaBroker(BaseBroker):
             return []
 
     def get_latest_price(self, symbol: str) -> float:
-        """Get latest price for a symbol."""
+        """Get latest price for a symbol.
+
+        Tries Alpaca market data first (requires paid plan), then falls back
+        to yfinance (free, ~15min delayed). The delay is acceptable because
+        prices are only used for share sizing — orders execute at market price.
+        """
         if not self._connected:
             raise ConnectionError("Not connected to Alpaca. Call connect() first.")
 
+        # Try Alpaca first
         try:
-            # Get latest trade
             trade = self.api.get_latest_trade(symbol)
             return float(trade.price)
         except Exception as e:
-            logger.error(f"Failed to get price for {symbol}: {e}")
-            raise
+            logger.debug(f"Alpaca price unavailable for {symbol}: {e}")
+
+        # Fallback to yfinance
+        return self._yfinance_price(symbol)
+
+    def get_latest_prices(self, symbols: list[str]) -> Dict[str, float]:
+        """Batch fetch latest prices for multiple symbols.
+
+        Tries Alpaca first, falls back to yfinance batch download.
+        More efficient than calling get_latest_price() in a loop.
+        """
+        if not self._connected:
+            raise ConnectionError("Not connected to Alpaca. Call connect() first.")
+
+        prices: Dict[str, float] = {}
+        missing: list[str] = []
+
+        # Try Alpaca for each symbol
+        for sym in symbols:
+            try:
+                trade = self.api.get_latest_trade(sym)
+                prices[sym] = float(trade.price)
+            except Exception:
+                missing.append(sym)
+
+        # Batch fallback to yfinance for any Alpaca misses
+        if missing:
+            logger.info(f"Fetching {len(missing)} prices from yfinance: {missing}")
+            try:
+                import yfinance as yf
+
+                data = yf.download(missing, period="5d", interval="1d", progress=False)
+                if "Close" in data.columns or hasattr(data, "Close"):
+                    close = data["Close"]
+                    if isinstance(close, pd.Series):
+                        # Single ticker returns a Series
+                        last_price = float(close.dropna().iloc[-1])
+                        prices[missing[0]] = last_price
+                    else:
+                        for sym in missing:
+                            if sym in close.columns:
+                                val = close[sym].dropna()
+                                if len(val) > 0:
+                                    prices[sym] = float(val.iloc[-1])
+            except Exception as e:
+                logger.warning(f"yfinance batch fallback failed: {e}")
+                # Fall back to individual calls
+                for sym in missing:
+                    if sym not in prices:
+                        try:
+                            prices[sym] = self._yfinance_price(sym)
+                        except Exception:
+                            pass
+
+        return prices
+
+    @staticmethod
+    def _yfinance_price(symbol: str) -> float:
+        """Get a single price from yfinance."""
+        import yfinance as yf
+
+        ticker = yf.Ticker(symbol)
+        price = ticker.fast_info.get("lastPrice")
+        if price and price > 0:
+            logger.info(f"yfinance price for {symbol}: ${price:.2f}")
+            return float(price)
+        raise ValueError(f"Could not get price for {symbol} from yfinance")
 
     def get_clock(self) -> Dict:
         """Get market clock."""

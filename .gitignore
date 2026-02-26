@@ -8,6 +8,7 @@ target/
 *.db
 data/raw/
 data/processed/
+data/models/
 mlruns/
 
 # IDE and editor files

@@ -5,10 +5,9 @@ Shows account status, pending orders, and prepares for next session.
 """
 
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from python.brokers.alpaca_broker import AlpacaPaperTrading
-from python.portfolio.risk_manager import RiskLimits, RiskManager
 
 
 def format_time_until(target_time):
@@ -44,16 +43,16 @@ def main():
         next_open = clock["next_open"]
         next_close = clock["next_close"]
 
-        print(f"\n🕐 Market Status:")
+        print("\n🕐 Market Status:")
         print(f"   Current Time (ET): {clock['timestamp']}")
-        print(f"   Status: 🔴 CLOSED")
+        print("   Status: 🔴 CLOSED")
         print(f"   Opens In: {format_time_until(next_open)}")
         print(f"   Next Open: {next_open}")
         print(f"   Next Close: {next_close}")
 
         # Account info
         account = broker.get_account()
-        print(f"\n💰 Account Summary:")
+        print("\n💰 Account Summary:")
         print(f"   Account ID: {account.account_id}")
         print(f"   Cash: ${account.cash:,.2f}")
         print(f"   Equity: ${account.equity:,.2f}")
@@ -85,26 +84,26 @@ def main():
         open_orders = broker.list_orders("open")
         all_orders = broker.list_orders("all")
 
-        print(f"\n📋 Orders:")
+        print("\n📋 Orders:")
         print(f"   Open Orders: {len(open_orders)}")
         print(f"   Total Orders Today: {len(all_orders)}")
 
         if open_orders:
-            print(f"\n   Pending Orders:")
+            print("\n   Pending Orders:")
             for order in open_orders:
-                print(
-                    f"      {order.symbol} {order.side.upper()} {order.qty} @ {order.order_type.upper()}"
-                )
+                side = order.side.upper()
+                otype = order.order_type.upper()
+                print(f"      {order.symbol} {side} {order.qty} @ {otype}")
 
         if all_orders:
-            print(f"\n   Recent Order History:")
+            print("\n   Recent Order History:")
             for order in all_orders[-5:]:  # Last 5
-                print(
-                    f"      {order.symbol} {order.side.upper()} {order.qty} @ {order.order_type.upper()}"
-                )
+                side = order.side.upper()
+                otype = order.order_type.upper()
+                print(f"      {order.symbol} {side} {order.qty} @ {otype}")
 
         # Historical data example
-        print(f"\n📊 Historical Data (AAPL - Last 5 Days):")
+        print("\n📊 Historical Data (AAPL - Last 5 Days):")
         try:
             bars = broker.get_bars("AAPL", timeframe="1D", limit=5)
             for bar in bars:
@@ -115,7 +114,7 @@ def main():
             print(f"   Could not fetch: {e}")
 
         # Risk check
-        print(f"\n⚠️  Risk Check:")
+        print("\n⚠️  Risk Check:")
         if positions:
             position_value = sum(p.market_value for p in positions)
             concentration = position_value / account.equity if account.equity > 0 else 0
@@ -126,9 +125,9 @@ def main():
                 else "   N/A"
             )
         else:
-            print(f"   No positions to analyze")
+            print("   No positions to analyze")
 
-        print(f"\n" + "=" * 60)
+        print("\n" + "=" * 60)
         print("✅ Ready for market open!")
         print("=" * 60)
 

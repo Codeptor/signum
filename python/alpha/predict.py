@@ -5,8 +5,10 @@ It handles the full pipeline from raw OHLCV data to target portfolio weights.
 """
 
 import logging
+from datetime import date
 from pathlib import Path
 
+import joblib
 import pandas as pd
 
 from python.alpha.features import (
@@ -29,6 +31,42 @@ MIN_HISTORY_DAYS = "6mo"
 
 # Training lookback — how much S&P 500 history to train the model on
 TRAINING_LOOKBACK = "5y"
+
+# Model cache directory
+MODEL_CACHE_DIR = Path("data/models")
+MODEL_CACHE_FILE = MODEL_CACHE_DIR / "latest_model.joblib"
+
+
+def _load_cached_model() -> CrossSectionalModel | None:
+    """Load a cached model if it was trained today. Returns None if stale or missing."""
+    if not MODEL_CACHE_FILE.exists():
+        return None
+
+    try:
+        cached = joblib.load(MODEL_CACHE_FILE)
+        trained_date = cached.get("trained_date")
+        model = cached.get("model")
+
+        if trained_date == date.today().isoformat() and model is not None:
+            logger.info(f"Loaded cached model from {MODEL_CACHE_FILE} (trained {trained_date})")
+            return model
+
+        logger.info(f"Cached model is stale (trained {trained_date}), will retrain")
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to load cached model: {e}")
+        return None
+
+
+def _save_model_cache(model: CrossSectionalModel) -> None:
+    """Save a trained model to disk with today's date."""
+    MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "model": model,
+        "trained_date": date.today().isoformat(),
+    }
+    joblib.dump(payload, MODEL_CACHE_FILE)
+    logger.info(f"Saved model cache to {MODEL_CACHE_FILE}")
 
 
 def fetch_universe(tickers: list[str], period: str = MIN_HISTORY_DAYS) -> pd.DataFrame:
@@ -58,12 +96,22 @@ def compute_features(long_df: pd.DataFrame) -> pd.DataFrame:
 def train_model(
     training_tickers: list[str] | None = None,
     data_path: str | None = None,
+    force_retrain: bool = False,
 ) -> CrossSectionalModel:
     """Train a fresh LightGBM model on historical S&P 500 data.
 
     Uses either a cached parquet file or fetches fresh data.
     Returns a fitted CrossSectionalModel.
+
+    If a model was already trained today, returns the cached version
+    unless force_retrain=True.
     """
+    # Check cache first
+    if not force_retrain:
+        cached_model = _load_cached_model()
+        if cached_model is not None:
+            return cached_model
+
     from python.alpha.features import compute_forward_returns, compute_residual_target
 
     cached = Path(data_path) if data_path else Path("data/raw/sp500_ohlcv.parquet")
@@ -108,6 +156,9 @@ def train_model(
 
     model = CrossSectionalModel(model_type="lightgbm", feature_cols=available_cols)
     model.fit(labeled, target_col="target_5d")
+
+    # Cache the trained model
+    _save_model_cache(model)
 
     return model
 

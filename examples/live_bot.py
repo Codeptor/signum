@@ -39,6 +39,8 @@ OPTIMIZER_METHOD = "hrp"
 MAX_POSITION_WEIGHT = 0.30
 MAX_PORTFOLIO_VAR_95 = 0.06
 MAX_DRAWDOWN_LIMIT = 0.15
+STOP_LOSS_PCT = 0.05  # 5% trailing stop-loss from entry price
+TAKE_PROFIT_PCT = 0.15  # 15% take-profit from entry price
 SLEEP_AFTER_TRADE_HOURS = 12
 SLEEP_MARKET_CLOSED_HOURS = 1
 
@@ -49,7 +51,18 @@ def run_trading_cycle(broker: AlpacaBroker, risk_manager: RiskManager) -> bool:
     logger.info("Starting daily trading cycle...")
     logger.info("=" * 60)
 
-    # 1. Run the ML pipeline to get target weights
+    # 1. Cancel any stale open orders from previous cycles
+    logger.info("Cancelling stale open orders...")
+    try:
+        cancelled = broker.cancel_all_orders()
+        if cancelled > 0:
+            logger.info(f"  Cancelled {cancelled} stale orders.")
+        else:
+            logger.info("  No stale orders to cancel.")
+    except Exception as e:
+        logger.warning(f"  Could not cancel stale orders: {e}")
+
+    # 2. Run the ML pipeline to get target weights
     logger.info("Running ML pipeline (train -> rank -> optimize)...")
     try:
         target_weights = get_ml_weights(
@@ -68,13 +81,9 @@ def run_trading_cycle(broker: AlpacaBroker, risk_manager: RiskManager) -> bool:
     for ticker, w in sorted(target_weights.items(), key=lambda x: -x[1]):
         logger.info(f"  {ticker}: {w:.2%}")
 
-    # 2. Get current prices for order sizing
-    prices = {}
-    for sym in target_weights:
-        try:
-            prices[sym] = broker.get_latest_price(sym)
-        except Exception as e:
-            logger.warning(f"Could not fetch price for {sym}: {e}")
+    # 3. Get current prices for order sizing (batch fetch, yfinance fallback)
+    logger.info("Fetching current prices for order sizing...")
+    prices = broker.get_latest_prices(list(target_weights.keys()))
 
     # Drop any tickers we couldn't price
     failed_tickers = set(target_weights) - set(prices)
@@ -90,7 +99,7 @@ def run_trading_cycle(broker: AlpacaBroker, risk_manager: RiskManager) -> bool:
         logger.error("No tradeable tickers remaining — skipping cycle")
         return False
 
-    # 3. Set up execution bridge with current account state
+    # 4. Set up execution bridge with current account state
     account = broker.get_account()
     logger.info(
         f"Account equity: ${account.equity:,.2f} | "
@@ -114,7 +123,7 @@ def run_trading_cycle(broker: AlpacaBroker, risk_manager: RiskManager) -> bool:
             f"(P&L: ${pos.unrealized_pl:.2f})"
         )
 
-    # 4. Reconcile portfolio to target weights
+    # 5. Reconcile portfolio to target weights
     logger.info("Reconciling portfolio to target weights...")
     fills = bridge.reconcile_target_weights(
         target_weights=target_weights,
@@ -130,7 +139,7 @@ def run_trading_cycle(broker: AlpacaBroker, risk_manager: RiskManager) -> bool:
     for fill in fills:
         logger.info(f"  {fill}")
 
-    # 5. Submit orders to Alpaca
+    # 6. Submit orders to Alpaca (bracket orders for buys, simple for sells)
     logger.info("Submitting orders to Alpaca...")
     orders_submitted = 0
     for fill in fills:
@@ -140,13 +149,38 @@ def run_trading_cycle(broker: AlpacaBroker, risk_manager: RiskManager) -> bool:
             qty = int(abs(fill.fill_quantity))  # Alpaca needs whole shares
             if qty == 0:
                 continue
-            broker_order = BrokerOrder(
-                symbol=symbol,
-                side=side,
-                qty=qty,
-                order_type="market",
-                time_in_force="day",
-            )
+
+            if side == "buy" and symbol in prices:
+                # Bracket order: market buy with stop-loss and take-profit
+                entry_price = prices[symbol]
+                stop_price = round(entry_price * (1 - STOP_LOSS_PCT), 2)
+                take_profit_price = round(entry_price * (1 + TAKE_PROFIT_PCT), 2)
+
+                broker_order = BrokerOrder(
+                    symbol=symbol,
+                    side=side,
+                    qty=qty,
+                    order_type="market",
+                    time_in_force="gtc",
+                    order_class="bracket",
+                    take_profit_limit_price=take_profit_price,
+                    stop_loss_stop_price=stop_price,
+                )
+                logger.info(
+                    f"  Bracket: BUY {qty} {symbol} | "
+                    f"SL ${stop_price} (-{STOP_LOSS_PCT:.0%}) | "
+                    f"TP ${take_profit_price} (+{TAKE_PROFIT_PCT:.0%})"
+                )
+            else:
+                # Simple market order for sells
+                broker_order = BrokerOrder(
+                    symbol=symbol,
+                    side=side,
+                    qty=qty,
+                    order_type="market",
+                    time_in_force="day",
+                )
+
             order_id = broker.submit_order(broker_order)
             orders_submitted += 1
             logger.info(f"  Submitted: {side.upper()} {qty} {symbol} -> Order ID: {order_id}")
@@ -163,6 +197,7 @@ def main():
     logger.info(f"  Universe: Top {TOP_N_STOCKS} S&P 500 by ML rank")
     logger.info(f"  Optimizer: {OPTIMIZER_METHOD.upper()}")
     logger.info(f"  Max position: {MAX_POSITION_WEIGHT:.0%}")
+    logger.info(f"  Stop-loss: {STOP_LOSS_PCT:.0%} | Take-profit: {TAKE_PROFIT_PCT:.0%}")
     logger.info(f"  Max drawdown: {MAX_DRAWDOWN_LIMIT:.0%}")
     logger.info("=" * 60)
 

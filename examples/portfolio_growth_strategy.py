@@ -14,9 +14,9 @@ Assets to trade:
 """
 
 import os
+
 from python.brokers.alpaca_broker import AlpacaPaperTrading
 from python.brokers.base import BrokerOrder
-from python.portfolio.risk_manager import RiskLimits, RiskManager
 
 
 def main():
@@ -43,7 +43,7 @@ def main():
         print(f"\n💰 Initial Equity: ${initial_equity:,.2f}")
         print(f"🎯 Target Equity: ${target_equity:,.2f}")
         print(f"📈 Target Return: +50.00% (${target_equity - initial_equity:,.2f})")
-        print(f"⏳ Timeframe: Multiple trading sessions")
+        print("⏳ Timeframe: Multiple trading sessions")
 
         # Define strategy allocations (aggressive growth)
         # Total: 80% invested, 20% cash reserve
@@ -58,20 +58,20 @@ def main():
         total_allocated = sum(allocations.values())
         cash_reserve = 1.0 - total_allocated
 
-        print(f"\n📊 Allocation Strategy:")
+        print("\n📊 Allocation Strategy:")
         for symbol, weight in allocations.items():
             amount = initial_equity * weight
             print(f"   {symbol}: {weight:.0%} (${amount:,.2f})")
         print(f"   Cash Reserve: {cash_reserve:.0%} (${initial_equity * cash_reserve:,.2f})")
 
-        print(f"\n⚠️  Risk Management:")
-        print(f"   Max Position Size: 25% per asset")
-        print(f"   Stop Loss: -8% per position")
-        print(f"   Take Profit: +20% per position")
-        print(f"   Max Drawdown: -15% portfolio")
+        print("\n⚠️  Risk Management:")
+        print("   Max Position Size: 25% per asset")
+        print("   Stop Loss: -8% per position")
+        print("   Take Profit: +20% per position")
+        print("   Max Drawdown: -15% portfolio")
 
         # Get current prices and calculate shares
-        print(f"\n📝 Planned Orders (will execute at market open):")
+        print("\n📝 Planned Orders (will execute at market open):")
         orders = []
 
         for symbol, weight in allocations.items():
@@ -105,25 +105,25 @@ def main():
             except Exception as e:
                 print(f"   ❌ {symbol}: Failed - {e}")
 
-        print(f"\n✅ Strategy deployed!")
+        print("\n✅ Strategy deployed!")
         print(f"   Orders Submitted: {len(submitted)}")
-        print(f"   Will fill at market open tomorrow 9:30 AM ET")
-        print(f"\n📈 Expected Portfolio at Open:")
+        print("   Will fill at market open tomorrow 9:30 AM ET")
+        print("\n📈 Expected Portfolio at Open:")
         print(f"   Cash: ${initial_equity * cash_reserve:,.2f}")
         print(f"   Invested: ${initial_equity * total_allocated:,.2f}")
         print(f"   Positions: {len(submitted)} assets")
 
-        print(f"\n🎯 Success Metrics:")
-        print(f"   To reach $150k, each position needs ~+10% return")
-        print(f"   Diversification reduces single-stock risk")
-        print(f"   Momentum strategy targets trending stocks")
+        print("\n🎯 Success Metrics:")
+        print("   To reach $150k, each position needs ~+10% return")
+        print("   Diversification reduces single-stock risk")
+        print("   Momentum strategy targets trending stocks")
 
-        print(f"\n⚠️  Monitor Daily:")
-        print(f"   Run: python examples/market_closed_dashboard.py")
-        print(f"   Check positions and P&L")
-        print(f"   Adjust if drawdown exceeds -15%")
+        print("\n⚠️  Monitor Daily:")
+        print("   Run: python examples/market_closed_dashboard.py")
+        print("   Check positions and P&L")
+        print("   Adjust if drawdown exceeds -15%")
 
-        print(f"\n" + "=" * 70)
+        print("\n" + "=" * 70)
 
     except Exception as e:
         print(f"\n❌ Error: {e}")

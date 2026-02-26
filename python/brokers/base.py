@@ -21,6 +21,11 @@ class BrokerOrder:
     stop_price: Optional[float] = None
     time_in_force: str = "day"  # day, gtc, ioc, fok
     client_order_id: Optional[str] = None
+    # Bracket order fields (Alpaca OTO/OCO)
+    order_class: Optional[str] = None  # 'bracket', 'oco', 'oto', or None for simple
+    take_profit_limit_price: Optional[float] = None
+    stop_loss_stop_price: Optional[float] = None
+    stop_loss_limit_price: Optional[float] = None
 
 
 @dataclass
