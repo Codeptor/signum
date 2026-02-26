@@ -410,6 +410,32 @@ def run_trading_cycle(
     return filled_count > 0 or partial_count > 0
 
 
+def _seconds_until(target_ts) -> float:
+    """Calculate seconds from now until a target timestamp.
+
+    Handles both timezone-aware and naive datetimes from Alpaca's clock API.
+    Returns at least 60 seconds to avoid tight loops.
+    """
+    from datetime import timezone
+
+    now = datetime.now(tz=timezone.utc)
+    if hasattr(target_ts, "timestamp"):
+        # datetime-like object
+        target = target_ts if target_ts.tzinfo else target_ts.replace(tzinfo=timezone.utc)
+        delta = (target - now).total_seconds()
+    elif isinstance(target_ts, str):
+        # ISO-format string
+        try:
+            target = datetime.fromisoformat(target_ts.replace("Z", "+00:00"))
+            delta = (target - now).total_seconds()
+        except ValueError:
+            delta = 3600.0  # fallback 1 hour
+    else:
+        delta = 3600.0  # fallback 1 hour
+
+    return max(delta, 60.0)
+
+
 def main():
     logger.info("=" * 60)
     logger.info("  LIVE TRADING BOT — ML-Driven")
@@ -479,19 +505,39 @@ def main():
                 traded = run_trading_cycle(broker, risk_manager, bridge)
 
                 if traded:
-                    logger.info(f"Sleeping {SLEEP_AFTER_TRADE_HOURS}h until next cycle...")
-                    time.sleep(60 * 60 * SLEEP_AFTER_TRADE_HOURS)
+                    # Sleep until next market open (dynamic, Fix #34)
+                    next_open = clock.get("next_open")
+                    # After trading, sleep until market re-opens next session
+                    # If next_open is available and in the future, sleep until then
+                    if next_open:
+                        sleep_secs = _seconds_until(next_open)
+                        logger.info(
+                            f"Trades executed. Sleeping {sleep_secs / 3600:.1f}h "
+                            f"until next open ({next_open})..."
+                        )
+                        time.sleep(sleep_secs)
+                    else:
+                        logger.info(f"Sleeping {SLEEP_AFTER_TRADE_HOURS}h (fallback)...")
+                        time.sleep(60 * 60 * SLEEP_AFTER_TRADE_HOURS)
                 else:
                     # No trades — check again in 30 min
                     logger.info("No trades executed. Rechecking in 30 minutes...")
                     time.sleep(60 * 30)
             else:
                 next_open = clock.get("next_open", "unknown")
-                logger.info(
-                    f"Market closed. Next open: {next_open}. "
-                    f"Sleeping {SLEEP_MARKET_CLOSED_HOURS}h..."
-                )
-                time.sleep(60 * 60 * SLEEP_MARKET_CLOSED_HOURS)
+                if next_open and next_open != "unknown":
+                    sleep_secs = _seconds_until(next_open)
+                    logger.info(
+                        f"Market closed. Next open: {next_open}. "
+                        f"Sleeping {sleep_secs / 3600:.1f}h..."
+                    )
+                    time.sleep(sleep_secs)
+                else:
+                    logger.info(
+                        f"Market closed (next open unknown). "
+                        f"Sleeping {SLEEP_MARKET_CLOSED_HOURS}h..."
+                    )
+                    time.sleep(60 * 60 * SLEEP_MARKET_CLOSED_HOURS)
 
     except KeyboardInterrupt:
         logger.info("Bot stopped by user (Ctrl+C).")
