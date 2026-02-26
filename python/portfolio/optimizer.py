@@ -1,7 +1,9 @@
 """Portfolio optimization: HRP, CVaR, Black-Litterman with ML views."""
 
 import logging
+from typing import Optional
 
+import numpy as np
 import pandas as pd
 from skfolio import RiskMeasure
 from skfolio.optimization import HierarchicalRiskParity, MeanRisk
@@ -10,30 +12,85 @@ from skfolio.prior import BlackLitterman, EmpiricalPrior
 logger = logging.getLogger(__name__)
 
 
+def _cap_weights(weights: pd.Series, max_weight: float) -> pd.Series:
+    """Cap individual weights and redistribute excess proportionally.
+
+    Iteratively clips weights above *max_weight* and spreads the surplus to
+    uncapped assets (proportional to their original weight) until no asset
+    exceeds the cap.  Guarantees weights still sum to 1.
+    """
+    w = weights.copy()
+    for _ in range(20):  # converge in a few iterations
+        excess_mask = w > max_weight
+        if not excess_mask.any():
+            break
+        surplus = (w[excess_mask] - max_weight).sum()
+        w[excess_mask] = max_weight
+        uncapped = ~excess_mask
+        unc_total = w[uncapped].sum()
+        if unc_total > 0:
+            w[uncapped] += surplus * (w[uncapped] / unc_total)
+        else:
+            # All assets are at the cap — distribute evenly
+            w[uncapped] = surplus / max(uncapped.sum(), 1)
+    # Normalize for any floating-point drift
+    w = w / w.sum() if w.sum() > 0 else w
+    return w
+
+
 class PortfolioOptimizer:
     """Multi-strategy portfolio optimizer using skfolio."""
 
-    def __init__(self, prices: pd.DataFrame):
-        """Initialize with a DataFrame of asset prices (columns=tickers, index=dates)."""
+    def __init__(self, prices: pd.DataFrame, max_weight: Optional[float] = None):
+        """Initialize with a DataFrame of asset prices (columns=tickers, index=dates).
+
+        Args:
+            prices: Price DataFrame (columns=tickers, index=dates).
+            max_weight: Optional cap on individual asset weight (e.g. 0.25).
+                Applied after optimization via iterative redistribution (Fix #18).
+        """
         self.prices = prices
         self.returns = prices.pct_change().dropna()
         self.tickers = list(prices.columns)
+        self.max_weight = max_weight
 
     def hrp(self) -> pd.Series:
         """Hierarchical Risk Parity allocation."""
-        model = HierarchicalRiskParity()
-        model.fit(self.returns)
-        return pd.Series(model.weights_, index=self.tickers, name="hrp_weights")
+        try:
+            model = HierarchicalRiskParity()
+            model.fit(self.returns)
+            weights = pd.Series(model.weights_, index=self.tickers, name="hrp_weights")
+        except Exception as e:
+            logger.error(f"HRP optimization failed: {e}. Falling back to equal weight.")
+            weights = pd.Series(
+                np.ones(len(self.tickers)) / len(self.tickers),
+                index=self.tickers,
+                name="hrp_weights",
+            )
+        if self.max_weight is not None:
+            weights = _cap_weights(weights, self.max_weight)
+        return weights
 
     def min_cvar(self, confidence_level: float = 0.95) -> pd.Series:
         """Minimum CVaR (Conditional Value at Risk) allocation."""
-        model = MeanRisk(
-            risk_measure=RiskMeasure.CVAR,
-            min_weights=0.0,
-            cvar_beta=confidence_level,
-        )
-        model.fit(self.returns)
-        return pd.Series(model.weights_, index=self.tickers, name="min_cvar_weights")
+        try:
+            model = MeanRisk(
+                risk_measure=RiskMeasure.CVAR,
+                min_weights=0.0,
+                cvar_beta=confidence_level,
+            )
+            model.fit(self.returns)
+            weights = pd.Series(model.weights_, index=self.tickers, name="min_cvar_weights")
+        except Exception as e:
+            logger.error(f"Min-CVaR optimization failed: {e}. Falling back to equal weight.")
+            weights = pd.Series(
+                np.ones(len(self.tickers)) / len(self.tickers),
+                index=self.tickers,
+                name="min_cvar_weights",
+            )
+        if self.max_weight is not None:
+            weights = _cap_weights(weights, self.max_weight)
+        return weights
 
     def black_litterman(
         self,
@@ -60,8 +117,7 @@ class PortfolioOptimizer:
         safe_tickers = [sanitize.get(t, t) for t in self.tickers]
 
         view_strings = [
-            f"{sanitize.get(ticker, ticker)} = {ret:.10f}"
-            for ticker, ret in views.items()
+            f"{sanitize.get(ticker, ticker)} = {ret:.10f}" for ticker, ret in views.items()
         ]
         confidence_array = [view_confidences[ticker] for ticker in views.index]
 
@@ -71,24 +127,44 @@ class PortfolioOptimizer:
             prior_estimator=EmpiricalPrior(),
         )
 
-        model = MeanRisk(
-            risk_measure=RiskMeasure.CVAR,
-            prior_estimator=prior_model,
-            min_weights=0.0,
-        )
-        model.fit(returns)
-        # Map sanitized names back to original tickers
-        unsanitize = {v: k for k, v in sanitize.items()}
-        original_tickers = [unsanitize.get(t, t) for t in safe_tickers]
-        return pd.Series(model.weights_, index=original_tickers, name="bl_weights")
+        try:
+            model = MeanRisk(
+                risk_measure=RiskMeasure.CVAR,
+                prior_estimator=prior_model,
+                min_weights=0.0,
+            )
+            model.fit(returns)
+            # Map sanitized names back to original tickers
+            unsanitize = {v: k for k, v in sanitize.items()}
+            original_tickers = [unsanitize.get(t, t) for t in safe_tickers]
+            weights = pd.Series(model.weights_, index=original_tickers, name="bl_weights")
+        except Exception as e:
+            logger.error(f"Black-Litterman optimization failed: {e}. Falling back to equal weight.")
+            weights = pd.Series(
+                np.ones(len(self.tickers)) / len(self.tickers),
+                index=self.tickers,
+                name="bl_weights",
+            )
+        if self.max_weight is not None:
+            weights = _cap_weights(weights, self.max_weight)
+        return weights
 
     def risk_parity(self) -> pd.Series:
         """Equal risk contribution allocation via HRP with variance risk measure."""
-        model = HierarchicalRiskParity(risk_measure=RiskMeasure.VARIANCE)
-        model.fit(self.returns)
-        return pd.Series(
-            model.weights_, index=self.tickers, name="risk_parity_weights"
-        )
+        try:
+            model = HierarchicalRiskParity(risk_measure=RiskMeasure.VARIANCE)
+            model.fit(self.returns)
+            weights = pd.Series(model.weights_, index=self.tickers, name="risk_parity_weights")
+        except Exception as e:
+            logger.error(f"Risk parity optimization failed: {e}. Falling back to equal weight.")
+            weights = pd.Series(
+                np.ones(len(self.tickers)) / len(self.tickers),
+                index=self.tickers,
+                name="risk_parity_weights",
+            )
+        if self.max_weight is not None:
+            weights = _cap_weights(weights, self.max_weight)
+        return weights
 
     def compare_all(
         self,
