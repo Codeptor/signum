@@ -58,7 +58,7 @@ def _verify_order_fill(
 ) -> dict:
     """Poll broker until order reaches a terminal state.
 
-    Returns a dict with keys: status, filled_qty, symbol, order_id.
+    Returns a dict with keys: status, filled_qty, filled_avg_price, symbol, order_id.
     """
     elapsed = 0.0
     while elapsed < ORDER_POLL_TIMEOUT_SECS:
@@ -72,9 +72,12 @@ def _verify_order_fill(
 
         status = (order.status or "").lower()
         if status in TERMINAL_ORDER_STATES:
+            # Extract fill price from the order response if available
+            filled_avg_price = getattr(order, "filled_avg_price", None)
             return {
                 "status": status,
                 "filled_qty": order.qty,
+                "filled_avg_price": filled_avg_price,
                 "symbol": symbol,
                 "order_id": order_id,
             }
@@ -89,6 +92,7 @@ def _verify_order_fill(
     return {
         "status": "timeout",
         "filled_qty": 0,
+        "filled_avg_price": None,
         "symbol": symbol,
         "order_id": order_id,
     }
@@ -260,47 +264,27 @@ def run_trading_cycle(
     for fill in fills:
         logger.info(f"  {fill}")
 
-    # 6. Submit orders to Alpaca (bracket orders for buys, simple for sells)
+    # 6. Submit orders to Alpaca
+    #    - Buys: simple market order first, then attach SL/TP anchored to fill price
+    #    - Sells: simple market order
     logger.info("Submitting orders to Alpaca...")
     submitted_orders: list[dict] = []  # Track for fill verification
     for fill in fills:
         try:
             symbol = fill.order.ticker
             side = fill.order.side.lower()  # BUY/SELL -> buy/sell
-            qty = int(abs(fill.fill_quantity))  # Alpaca needs whole shares
-            if qty == 0:
+            qty = round(abs(fill.fill_quantity), 4)  # Fractional shares OK (Fix #32)
+            if qty < 0.0001:
                 continue
 
-            if side == "buy" and symbol in prices:
-                # Bracket order: market buy with stop-loss and take-profit
-                entry_price = prices[symbol]
-                stop_price = round(entry_price * (1 - STOP_LOSS_PCT), 2)
-                take_profit_price = round(entry_price * (1 + TAKE_PROFIT_PCT), 2)
-
-                broker_order = BrokerOrder(
-                    symbol=symbol,
-                    side=side,
-                    qty=qty,
-                    order_type="market",
-                    time_in_force="gtc",
-                    order_class="bracket",
-                    take_profit_limit_price=take_profit_price,
-                    stop_loss_stop_price=stop_price,
-                )
-                logger.info(
-                    f"  Bracket: BUY {qty} {symbol} | "
-                    f"SL ${stop_price} (-{STOP_LOSS_PCT:.0%}) | "
-                    f"TP ${take_profit_price} (+{TAKE_PROFIT_PCT:.0%})"
-                )
-            else:
-                # Simple market order for sells
-                broker_order = BrokerOrder(
-                    symbol=symbol,
-                    side=side,
-                    qty=qty,
-                    order_type="market",
-                    time_in_force="day",
-                )
+            # Submit simple market order (SL/TP added after fill for buys)
+            broker_order = BrokerOrder(
+                symbol=symbol,
+                side=side,
+                qty=qty,
+                order_type="market",
+                time_in_force="day",
+            )
 
             order_id = broker.submit_order(broker_order)
             submitted_orders.append(
@@ -309,9 +293,10 @@ def run_trading_cycle(
                     "symbol": symbol,
                     "side": side,
                     "qty": qty,
+                    "needs_sl_tp": side == "buy",
                 }
             )
-            logger.info(f"  Submitted: {side.upper()} {qty} {symbol} -> Order ID: {order_id}")
+            logger.info(f"  Submitted: {side.upper()} {qty:.4f} {symbol} -> Order ID: {order_id}")
         except Exception as e:
             logger.error(f"  Failed to submit order for {fill.order.ticker}: {e}")
 
@@ -319,7 +304,7 @@ def run_trading_cycle(
         logger.info("No orders were submitted.")
         return False
 
-    # 7. Verify fills — poll each order until terminal state
+    # 7. Verify fills — poll each order until terminal state, then attach SL/TP
     logger.info(f"Verifying {len(submitted_orders)} order fills...")
     filled_count = 0
     partial_count = 0
@@ -331,7 +316,69 @@ def run_trading_cycle(
 
         if status == "filled":
             filled_count += 1
-            logger.info(f"  FILLED: {entry['side'].upper()} {entry['qty']} {entry['symbol']}")
+            logger.info(f"  FILLED: {entry['side'].upper()} {entry['qty']:.4f} {entry['symbol']}")
+
+            # Attach SL/TP orders anchored to actual fill price (Fix #33)
+            if entry.get("needs_sl_tp") and result["filled_avg_price"] is not None:
+                try:
+                    fill_price = float(result["filled_avg_price"])
+                    sl_price = round(fill_price * (1 - STOP_LOSS_PCT), 2)
+                    tp_price = round(fill_price * (1 + TAKE_PROFIT_PCT), 2)
+
+                    # Submit stop-loss
+                    sl_order = BrokerOrder(
+                        symbol=entry["symbol"],
+                        side="sell",
+                        qty=entry["qty"],
+                        order_type="stop",
+                        stop_price=sl_price,
+                        time_in_force="gtc",
+                    )
+                    sl_id = broker.submit_order(sl_order)
+                    logger.info(
+                        f"    SL attached: SELL {entry['symbol']} @ ${sl_price} "
+                        f"(-{STOP_LOSS_PCT:.0%} from fill ${fill_price:.2f}) -> {sl_id}"
+                    )
+
+                    # Submit take-profit
+                    tp_order = BrokerOrder(
+                        symbol=entry["symbol"],
+                        side="sell",
+                        qty=entry["qty"],
+                        order_type="limit",
+                        limit_price=tp_price,
+                        time_in_force="gtc",
+                    )
+                    tp_id = broker.submit_order(tp_order)
+                    logger.info(
+                        f"    TP attached: SELL {entry['symbol']} @ ${tp_price} "
+                        f"(+{TAKE_PROFIT_PCT:.0%} from fill ${fill_price:.2f}) -> {tp_id}"
+                    )
+                except Exception as e:
+                    logger.error(f"    Failed to attach SL/TP for {entry['symbol']}: {e}")
+            elif entry.get("needs_sl_tp"):
+                logger.warning(
+                    f"    No fill price available for {entry['symbol']} — "
+                    f"SL/TP not attached (using quoted price as fallback)"
+                )
+                # Fallback: use the quoted price from the prices dict
+                if entry["symbol"] in prices:
+                    try:
+                        quoted = prices[entry["symbol"]]
+                        sl_price = round(quoted * (1 - STOP_LOSS_PCT), 2)
+                        sl_order = BrokerOrder(
+                            symbol=entry["symbol"],
+                            side="sell",
+                            qty=entry["qty"],
+                            order_type="stop",
+                            stop_price=sl_price,
+                            time_in_force="gtc",
+                        )
+                        broker.submit_order(sl_order)
+                        logger.info(f"    SL fallback @ ${sl_price} (quoted price)")
+                    except Exception as e:
+                        logger.error(f"    SL fallback also failed for {entry['symbol']}: {e}")
+
         elif status == "partially_filled":
             partial_count += 1
             logger.warning(
@@ -341,15 +388,17 @@ def run_trading_cycle(
         elif status in ("canceled", "cancelled", "expired"):
             failed_count += 1
             logger.warning(
-                f"  CANCELLED/EXPIRED: {entry['side'].upper()} {entry['qty']} {entry['symbol']}"
+                f"  CANCELLED/EXPIRED: {entry['side'].upper()} {entry['qty']:.4f} {entry['symbol']}"
             )
         elif status == "rejected":
             failed_count += 1
-            logger.error(f"  REJECTED: {entry['side'].upper()} {entry['qty']} {entry['symbol']}")
+            logger.error(
+                f"  REJECTED: {entry['side'].upper()} {entry['qty']:.4f} {entry['symbol']}"
+            )
         else:
             # timeout or unknown
             logger.warning(
-                f"  TIMEOUT: {entry['side'].upper()} {entry['qty']} {entry['symbol']} "
+                f"  TIMEOUT: {entry['side'].upper()} {entry['qty']:.4f} {entry['symbol']} "
                 f"— order still open after {ORDER_POLL_TIMEOUT_SECS}s"
             )
 

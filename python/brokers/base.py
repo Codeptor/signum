@@ -30,6 +30,7 @@ class BrokerOrder:
     order_id: Optional[str] = None
     parent_order_id: Optional[str] = None
     status: Optional[str] = None
+    filled_avg_price: Optional[float] = None  # Actual fill price from broker
 
 
 @dataclass
