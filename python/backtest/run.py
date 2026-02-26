@@ -412,24 +412,27 @@ def run_backtest(
     if len(portfolio_returns) > 30:
         from python.portfolio.risk import RiskEngine
 
-        # Create RiskEngine with dummy weights (equal weighted portfolio)
-        dummy_weights = pd.Series(
-            {ticker: 1.0 / len(prices.columns) for ticker in prices.columns[:5]}
-        )
-        risk_engine = RiskEngine(
-            returns=prices.pct_change().dropna().iloc[-min(len(prices), 252) :],
-            weights=dummy_weights,
-        )
+        # Use actual portfolio weights from the simulation (Fix #38)
+        risk_tickers = [t for t in latest_weights.index if t in prices.columns]
+        if risk_tickers:
+            risk_weights = latest_weights.reindex(risk_tickers).fillna(0.0)
+            if risk_weights.sum() > 0:
+                risk_weights = risk_weights / risk_weights.sum()
+            risk_returns = prices[risk_tickers].pct_change().dropna().iloc[-min(len(prices), 252) :]
+            risk_engine = RiskEngine(
+                returns=risk_returns,
+                weights=risk_weights,
+            )
 
-        # Add key risk metrics to results
-        results["risk_metrics"] = {
-            "sortino_ratio": risk_engine.sortino_ratio(),
-            "calmar_ratio": risk_engine.calmar_ratio(),
-            "omega_ratio": risk_engine.omega_ratio(),
-            "var_95": risk_engine.var_historical(0.95),
-            "cvar_95": risk_engine.cvar_historical(0.95),
-            "downside_deviation": risk_engine.downside_deviation(),
-        }
+            # Add key risk metrics to results
+            results["risk_metrics"] = {
+                "sortino_ratio": risk_engine.sortino_ratio(),
+                "calmar_ratio": risk_engine.calmar_ratio(),
+                "omega_ratio": risk_engine.omega_ratio(),
+                "var_95": risk_engine.var_historical(0.95),
+                "cvar_95": risk_engine.cvar_historical(0.95),
+                "downside_deviation": risk_engine.downside_deviation(),
+            }
 
     # Add RiskManager summary if enabled
     if risk_manager is not None:
