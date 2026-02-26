@@ -303,6 +303,7 @@ class AlpacaBroker(BaseBroker):
                     parent_order_id=getattr(o, "parent_order_id", None),
                     status=o.status,
                     order_class=getattr(o, "order_class", None),
+                    created_at=getattr(o, "created_at", None),
                 )
                 for o in orders
             ]

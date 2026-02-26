@@ -31,6 +31,7 @@ class BrokerOrder:
     parent_order_id: Optional[str] = None
     status: Optional[str] = None
     filled_avg_price: Optional[float] = None  # Actual fill price from broker
+    created_at: Optional[str] = None  # ISO timestamp when order was created
 
 
 @dataclass

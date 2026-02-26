@@ -137,6 +137,66 @@ def _verify_order_fill(
     }
 
 
+def _cancel_existing_sl_tp_orders(broker: AlpacaBroker, symbol: str) -> int:
+    """Cancel any existing stop-loss or take-profit orders for a symbol.
+
+    Prevents SL/TP order accumulation when a position is topped up across
+    multiple trading cycles.
+
+    Returns the number of orders cancelled.
+    """
+    try:
+        open_orders = broker.list_orders(status="open")
+        cancelled = 0
+        for order in open_orders:
+            if order.symbol == symbol and order.order_type in ("stop", "limit"):
+                # SL orders are stop orders, TP orders are limit orders
+                # Both are sell-side (closing the position)
+                if order.side.lower() == "sell" and order.order_id:
+                    try:
+                        broker.cancel_order(order.order_id)
+                        cancelled += 1
+                        logger.info(f"  Cancelled existing {order.order_type} order for {symbol}")
+                    except Exception as e:
+                        logger.warning(f"  Failed to cancel {order.order_type} for {symbol}: {e}")
+        return cancelled
+    except Exception as e:
+        logger.warning(f"  Could not list orders to cancel SL/TP for {symbol}: {e}")
+        return 0
+
+
+def _has_traded_today(broker: AlpacaBroker) -> bool:
+    """Check if the bot has already submitted orders today.
+
+    Prevents duplicate execution on restart by checking for recent orders
+    from the current trading session.
+    """
+    try:
+        # Get all orders (including closed)
+        orders = broker.list_orders(status="all")
+
+        # Filter to non-cancelled orders from today
+        today = datetime.now().strftime("%Y-%m-%d")
+        executed_today = [
+            o
+            for o in orders
+            if o.status not in ("canceled", "cancelled", "expired")
+            and o.order_id
+            and hasattr(o, "created_at")
+            and o.created_at
+            and o.created_at.startswith(today)
+        ]
+
+        if executed_today:
+            logger.info(f"Found {len(executed_today)} orders executed today.")
+            return True
+
+        return False
+    except Exception as e:
+        logger.warning(f"Could not check if traded today: {e}. Assuming no trades.")
+        return False
+
+
 def _initialize_risk_engine(broker: AlpacaBroker, risk_manager: RiskManager) -> None:
     """Initialize the risk engine with historical returns for current positions.
 
@@ -360,6 +420,10 @@ def run_trading_cycle(
             # Attach SL/TP orders anchored to actual fill price (Fix #33)
             if entry.get("needs_sl_tp") and result["filled_avg_price"] is not None:
                 try:
+                    # Cancel any existing SL/TP orders for this symbol to prevent
+                    # order accumulation across trading cycles (P0-1 fix)
+                    _cancel_existing_sl_tp_orders(broker, entry["symbol"])
+
                     fill_price = float(result["filled_avg_price"])
                     sl_price = round(fill_price * (1 - STOP_LOSS_PCT), 2)
                     tp_price = round(fill_price * (1 + TAKE_PROFIT_PCT), 2)
@@ -504,6 +568,12 @@ def main():
     if not broker.connect():
         logger.error("Failed to connect to Alpaca. Exiting.")
         sys.exit(1)
+
+    # Check if we've already traded today (duplicate execution guard - P0-5)
+    if _has_traded_today(broker):
+        logger.info("Already traded today. Exiting to prevent duplicate execution.")
+        broker.disconnect()
+        sys.exit(0)
 
     risk_limits = RiskLimits(
         max_position_weight=MAX_POSITION_WEIGHT,

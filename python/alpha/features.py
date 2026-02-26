@@ -72,7 +72,9 @@ def _compute_single_ticker(df: pd.DataFrame) -> pd.DataFrame:
     # Moving averages
     for w in [5, 10, 20, 60]:
         df[f"ma_{w}"] = c.rolling(w).mean()
-        df[f"ma_ratio_{w}"] = c / c.rolling(w).mean()
+        # Guard against division by zero in rolling mean
+        rolling_mean = c.rolling(w).mean()
+        df[f"ma_ratio_{w}"] = np.where(rolling_mean != 0, c / rolling_mean, np.nan)
 
     # Volatility (using log returns for time-additivity — Fix #21)
     log_ret = np.log(c / c.shift(1))
@@ -98,11 +100,13 @@ def _compute_single_ticker(df: pd.DataFrame) -> pd.DataFrame:
     std20 = c.rolling(20).std()
     df["bb_upper"] = ma20 + 2 * std20
     df["bb_lower"] = ma20 - 2 * std20
-    df["bb_position"] = (c - df["bb_lower"]) / (df["bb_upper"] - df["bb_lower"])
+    bb_range = df["bb_upper"] - df["bb_lower"]
+    df["bb_position"] = np.where(bb_range != 0, (c - df["bb_lower"]) / bb_range, 0.5)
 
     # Volume features
     df["volume_ma_10"] = v.rolling(10).mean()
-    df["volume_ratio"] = v / v.rolling(10).mean()
+    vol_ma = v.rolling(10).mean()
+    df["volume_ratio"] = np.where(vol_ma != 0, v / vol_ma, 1.0)
 
     # Liquidity features
     dollar_vol = c * v
@@ -110,10 +114,10 @@ def _compute_single_ticker(df: pd.DataFrame) -> pd.DataFrame:
     df["amihud_illiq"] = (
         (c.pct_change().abs() / np.where(dollar_vol != 0, dollar_vol, np.nan)).rolling(20).mean()
     )
-    df["bid_ask_proxy"] = (h - lo) / c  # Corwin-Schultz spread proxy
+    df["bid_ask_proxy"] = np.where(c != 0, (h - lo) / c, 0.0)  # Corwin-Schultz spread proxy
 
     # Open-close range
-    df["oc_range"] = (c - o) / c
+    df["oc_range"] = np.where(c != 0, (c - o) / c, 0.0)
 
     return df
 

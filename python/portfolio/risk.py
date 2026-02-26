@@ -57,7 +57,8 @@ class RiskEngine:
         # Cornish-Fisher expansion
         z_cf = z + (z**2 - 1) * s / 6 + (z**3 - 3 * z) * k / 24 - (2 * z**3 - 5 * z) * s**2 / 36
 
-        return float(-(self.portfolio_returns.mean() + z_cf * self.portfolio_returns.std()))
+        # Return negative value to match var_parametric and var_historical sign convention
+        return float(self.portfolio_returns.mean() + z_cf * self.portfolio_returns.std())
 
     def cvar_historical(self, confidence: float = 0.95) -> float:
         """Conditional VaR (Expected Shortfall) via historical simulation."""
@@ -235,25 +236,18 @@ class RiskEngine:
         return self.portfolio_returns.rolling(window).apply(max_dd, raw=False)
 
     def rolling_beta(self, market_returns: pd.Series, window: int = 63) -> pd.Series:
-        """Rolling beta vs market."""
+        """Rolling beta vs market.
 
-        def calc_beta(window_data):
-            if len(window_data) < 2:
-                return np.nan
-            port_ret = window_data.iloc[:, 0]
-            mkt_ret = window_data.iloc[:, 1]
-            cov = np.cov(port_ret, mkt_ret)
-            return cov[0, 1] / cov[1, 1] if cov[1, 1] != 0 else 0
-
-        combined = pd.concat([self.portfolio_returns, market_returns], axis=1)
-        return (
-            combined.rolling(window)
-            .apply(
-                lambda x: calc_beta(x.to_frame()),
-                raw=False,
-            )
-            .iloc[:, 0]
-        )
+        Uses rolling covariance and variance for correct 2D window computation.
+        """
+        combined = pd.concat([self.portfolio_returns, market_returns], axis=1, keys=["port", "mkt"])
+        # Rolling covariance between portfolio and market
+        rolling_cov = combined["port"].rolling(window).cov(combined["mkt"])
+        # Rolling variance of market
+        rolling_var = combined["mkt"].rolling(window).var()
+        # Beta = cov(port, mkt) / var(mkt)
+        beta = rolling_cov / rolling_var
+        return beta.replace([np.inf, -np.inf], np.nan)
 
     def volatility_regime(
         self, window: int = 63, low_threshold: float = 0.10, high_threshold: float = 0.20
