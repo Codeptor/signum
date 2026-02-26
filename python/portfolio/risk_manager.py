@@ -63,14 +63,18 @@ class RiskManager:
         self,
         limits: Optional[RiskLimits] = None,
         risk_free_rate: float = 0.02,
+        sector_map: Optional[Dict[str, str]] = None,
     ):
         """
         Args:
             limits: Risk limits configuration
             risk_free_rate: Annual risk-free rate
+            sector_map: Mapping of ticker -> sector (e.g. {"AAPL": "Technology"}).
+                If None, sector weight checks are skipped (Fix #17).
         """
         self.limits = limits or RiskLimits()
         self.risk_free_rate = risk_free_rate
+        self.sector_map = sector_map or {}
 
         # Tracking
         self.daily_trades: Dict[str, int] = {}
@@ -200,9 +204,11 @@ class RiskManager:
                     )
                 )
 
-        # 4. Leverage check
+        # 4. Leverage check — subtract old weight for this ticker to avoid
+        #    double-counting when updating an existing position (Fix #15).
         if self.current_weights is not None:
-            total_weight = self.current_weights.sum() + new_weight
+            old_weight = self.current_weights.get(ticker, 0.0)
+            total_weight = self.current_weights.sum() - old_weight + new_weight
             if total_weight > self.limits.max_leverage:
                 checks.append(
                     RiskCheck(
@@ -212,6 +218,51 @@ class RiskManager:
                         severity="critical",
                         metric_value=total_weight,
                         limit_value=self.limits.max_leverage,
+                    )
+                )
+
+        # 5. Daily turnover limit (Fix #16)
+        daily_to = self.daily_turnover.get(date_key, 0.0)
+        if daily_to >= self.limits.max_daily_turnover:
+            checks.append(
+                RiskCheck(
+                    passed=False,
+                    rule="MAX_DAILY_TURNOVER",
+                    message=f"Daily turnover {daily_to:.1%} reached limit "
+                    f"{self.limits.max_daily_turnover:.1%}",
+                    severity="critical",
+                    metric_value=daily_to,
+                    limit_value=self.limits.max_daily_turnover,
+                )
+            )
+        else:
+            checks.append(
+                RiskCheck(
+                    passed=True,
+                    rule="DAILY_TURNOVER",
+                    message=f"Daily turnover: {daily_to:.1%}/{self.limits.max_daily_turnover:.1%}",
+                    severity="info",
+                )
+            )
+
+        # 6. Sector weight limit (Fix #17)
+        sector = self.sector_map.get(ticker)
+        if sector and self.current_weights is not None:
+            # Sum weights of all tickers in the same sector
+            sector_tickers = [t for t, s in self.sector_map.items() if s == sector and t != ticker]
+            sector_weight = (
+                sum(self.current_weights.get(t, 0.0) for t in sector_tickers) + new_weight
+            )
+            if sector_weight > self.limits.max_sector_weight:
+                checks.append(
+                    RiskCheck(
+                        passed=False,
+                        rule="MAX_SECTOR_WEIGHT",
+                        message=f"Sector '{sector}' weight {sector_weight:.1%} exceeds "
+                        f"limit {self.limits.max_sector_weight:.1%}",
+                        severity="warning",
+                        metric_value=sector_weight,
+                        limit_value=self.limits.max_sector_weight,
                     )
                 )
 
