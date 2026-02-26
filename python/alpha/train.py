@@ -17,7 +17,31 @@ from python.data.ingestion import reshape_ohlcv_wide_to_long
 
 logger = logging.getLogger(__name__)
 
+# Phase 3: Reduced feature set — 8 orthogonal, interpretable features.
+# Rationale (see docs/IMPROVEMENT_PLAN.md §2.3.2):
+#   - Removed highly correlated features (ma_ratio_5/10/20/60 all similar)
+#   - Removed duplicate info (bid_ask_proxy ≈ vol proxy)
+#   - Removed noisy microstructure features (amihud_illiq, dollar_volume_20d)
+#   - Kept only features with distinct predictive signals
 FEATURE_COLS = [
+    # Momentum (2) — short and medium-term return signals
+    "ret_5d",
+    "ret_20d",
+    # Mean reversion (2) — identify overbought/oversold
+    "rsi_14",
+    "bb_position",
+    # Volatility (1) — risk adjustment
+    "vol_20d",
+    # Volume (1) — confirm momentum with volume
+    "volume_ratio",
+    # Cross-sectional (1) — relative strength
+    "cs_ret_rank_5d",
+    # Macro (1) — market regime
+    "vix",
+]
+
+# Full feature set preserved for comparison / ablation studies
+FEATURE_COLS_FULL = [
     "ret_5d",
     "ret_10d",
     "ret_20d",
