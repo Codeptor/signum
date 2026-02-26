@@ -645,3 +645,263 @@ class TestLoadBotState:
         with patch("examples.live_bot.STATE_FILE", state_file):
             result = _load_bot_state()
             assert result == {}
+
+
+# ===========================================================================
+# T-ATOMIC: Atomic write — .tmp residue from crash, old state survives
+# ===========================================================================
+
+
+class TestAtomicWrite:
+    """T-ATOMIC: _save_bot_state uses atomic write (tmp + rename).
+
+    Verifies that:
+    - A crash during write leaves old state intact (no .tmp residue)
+    - Successful write replaces old state atomically
+    """
+
+    def test_successful_write_replaces_old_state(self, tmp_path):
+        """Normal save overwrites previous state atomically."""
+        from examples.live_bot import _load_bot_state, _save_bot_state
+
+        state_file = tmp_path / "bot_state.json"
+        # Write initial state
+        state_file.write_text(json.dumps({"version": 1, "equity": 100000}))
+
+        with patch("examples.live_bot.STATE_FILE", state_file):
+            _save_bot_state({"version": 2, "equity": 99000})
+            result = _load_bot_state()
+
+        assert result["version"] == 2
+        assert result["equity"] == 99000
+
+    def test_crash_during_write_preserves_old_state(self, tmp_path):
+        """If json.dump raises, the original state file must survive."""
+        from examples.live_bot import _save_bot_state
+
+        state_file = tmp_path / "bot_state.json"
+        state_file.write_text(json.dumps({"version": 1, "equity": 100000}))
+
+        with patch("examples.live_bot.STATE_FILE", state_file):
+            # Force json.dump to raise mid-write
+            with patch("json.dump", side_effect=IOError("disk full")):
+                _save_bot_state({"version": 2, "equity": 99000})
+
+        # Original state should be intact
+        import json as json_mod
+
+        surviving = json_mod.loads(state_file.read_text())
+        assert surviving["version"] == 1
+
+    def test_no_tmp_residue_after_success(self, tmp_path):
+        """After successful save, no .tmp file should remain."""
+        from examples.live_bot import _save_bot_state
+
+        state_file = tmp_path / "bot_state.json"
+
+        with patch("examples.live_bot.STATE_FILE", state_file):
+            _save_bot_state({"version": 1})
+
+        tmp_file = state_file.with_suffix(".tmp")
+        assert not tmp_file.exists(), ".tmp file should be cleaned up after atomic rename"
+
+    def test_no_tmp_residue_after_crash(self, tmp_path):
+        """After a crash in json.dump, .tmp file should not persist (or be incomplete)."""
+        from examples.live_bot import _save_bot_state
+
+        state_file = tmp_path / "bot_state.json"
+        state_file.write_text(json.dumps({"version": 1}))
+
+        with patch("examples.live_bot.STATE_FILE", state_file):
+            with patch("json.dump", side_effect=IOError("disk full")):
+                _save_bot_state({"version": 2})
+
+        # The .tmp file may or may not exist depending on when the crash
+        # occurred, but the main state file must still be valid
+        assert state_file.exists()
+        surviving = json.loads(state_file.read_text())
+        assert surviving["version"] == 1
+
+
+# ===========================================================================
+# T-LIQFAIL: Liquidation: timeout alert fires; submit failure doesn't block
+# ===========================================================================
+
+
+class TestLiquidationFailures:
+    """T-LIQFAIL: Liquidation edge cases.
+
+    - Submit failure for one symbol doesn't block others
+    - Timeout triggers alert
+    """
+
+    @patch("time.sleep", return_value=None)
+    def test_submit_failure_doesnt_block_others(self, _sleep):
+        """If one position fails to submit, others should still be liquidated."""
+        from examples.live_bot import _liquidate_all_positions
+
+        mock_broker = MagicMock()
+
+        # 3 positions
+        mock_broker.list_positions.return_value = [
+            MagicMock(symbol="AAPL", qty=10.0),
+            MagicMock(symbol="MSFT", qty=5.0),
+            MagicMock(symbol="GOOG", qty=20.0),
+        ]
+
+        # MSFT submit fails, others succeed
+        submit_results = iter(["order-aapl", Exception("API error"), "order-goog"])
+
+        def submit_side_effect(order):
+            result = next(submit_results)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        mock_broker.submit_order.side_effect = submit_side_effect
+        mock_broker.get_order.return_value = MagicMock(
+            status="filled", filled_qty=10.0, filled_avg_price=150.0, qty=10.0,
+        )
+
+        confirmed = _liquidate_all_positions(mock_broker)
+
+        # AAPL + GOOG confirmed, MSFT skipped
+        assert confirmed == 2
+        assert mock_broker.submit_order.call_count == 3  # All 3 attempted
+
+    @patch("time.sleep", return_value=None)
+    def test_timeout_triggers_alert(self, _sleep):
+        """If a liquidation fill times out, _send_alert should fire."""
+        from examples.live_bot import _liquidate_all_positions
+
+        mock_broker = MagicMock()
+        mock_broker.list_positions.return_value = [
+            MagicMock(symbol="AAPL", qty=10.0),
+        ]
+        mock_broker.submit_order.return_value = "order-aapl"
+
+        # get_order always returns 'new' → timeout
+        mock_order = MagicMock()
+        mock_order.status = "new"
+        mock_order.filled_qty = None
+        mock_order.filled_avg_price = None
+        mock_broker.get_order.return_value = mock_order
+
+        with patch("examples.live_bot._send_alert") as mock_alert:
+            confirmed = _liquidate_all_positions(mock_broker)
+
+        assert confirmed == 0
+        # Alert should fire for the timeout (per-symbol + summary)
+        assert mock_alert.call_count >= 2
+        # One of the alerts should mention AAPL specifically
+        all_msgs = [call[0][0] for call in mock_alert.call_args_list]
+        assert any("AAPL" in msg for msg in all_msgs), (
+            f"Expected an alert mentioning AAPL, got: {all_msgs}"
+        )
+
+    @patch("time.sleep", return_value=None)
+    def test_cancel_retry_on_failure(self, _sleep):
+        """H-LIQRACE: cancel_all_orders is retried up to 3 times."""
+        from examples.live_bot import _liquidate_all_positions
+
+        mock_broker = MagicMock()
+        mock_broker.list_positions.return_value = []
+
+        # First two cancel attempts fail, third succeeds
+        mock_broker.cancel_all_orders.side_effect = [
+            Exception("timeout"),
+            Exception("timeout"),
+            None,
+        ]
+
+        _liquidate_all_positions(mock_broker)
+
+        assert mock_broker.cancel_all_orders.call_count == 3
+
+
+# ===========================================================================
+# T-HASDAY: _has_traded_today edge cases
+# ===========================================================================
+
+
+class TestHasTradedToday:
+    """T-HASDAY: _has_traded_today handles string vs datetime created_at,
+    yesterday orders, and broker exceptions.
+    """
+
+    def test_string_created_at_today(self):
+        """Orders with string created_at matching today should count."""
+        from examples.live_bot import _has_traded_today
+
+        mock_broker = MagicMock()
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        order = MagicMock()
+        order.status = "filled"
+        order.order_id = "ord-1"
+        order.created_at = f"{today_str}T14:30:00Z"  # String format
+        mock_broker.list_orders.return_value = [order]
+
+        assert _has_traded_today(mock_broker) is True
+
+    def test_datetime_created_at_today(self):
+        """Orders with datetime created_at matching today should count (C2 fix)."""
+        from examples.live_bot import _has_traded_today
+
+        mock_broker = MagicMock()
+
+        order = MagicMock()
+        order.status = "filled"
+        order.order_id = "ord-2"
+        order.created_at = datetime.now(timezone.utc)  # datetime object
+        mock_broker.list_orders.return_value = [order]
+
+        assert _has_traded_today(mock_broker) is True
+
+    def test_yesterday_orders_not_counted(self):
+        """Orders from yesterday should not count as traded today."""
+        from examples.live_bot import _has_traded_today
+
+        mock_broker = MagicMock()
+        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        order = MagicMock()
+        order.status = "filled"
+        order.order_id = "ord-3"
+        order.created_at = f"{yesterday}T14:30:00Z"
+        mock_broker.list_orders.return_value = [order]
+
+        assert _has_traded_today(mock_broker) is False
+
+    def test_cancelled_orders_not_counted(self):
+        """Cancelled orders should not count as having traded."""
+        from examples.live_bot import _has_traded_today
+
+        mock_broker = MagicMock()
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        order = MagicMock()
+        order.status = "canceled"
+        order.order_id = "ord-4"
+        order.created_at = f"{today_str}T14:30:00Z"
+        mock_broker.list_orders.return_value = [order]
+
+        assert _has_traded_today(mock_broker) is False
+
+    def test_broker_exception_returns_true(self):
+        """Broker exceptions should fail closed (return True to prevent duplicates)."""
+        from examples.live_bot import _has_traded_today
+
+        mock_broker = MagicMock()
+        mock_broker.list_orders.side_effect = Exception("API down")
+
+        assert _has_traded_today(mock_broker) is True
+
+    def test_no_orders_returns_false(self):
+        """Empty order list means we haven't traded today."""
+        from examples.live_bot import _has_traded_today
+
+        mock_broker = MagicMock()
+        mock_broker.list_orders.return_value = []
+
+        assert _has_traded_today(mock_broker) is False

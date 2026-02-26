@@ -189,6 +189,120 @@ class TestExecutionBridge:
         assert fill is None  # Should be rejected
 
 
+class TestPositionFlip:
+    """T-FLIP: Position.update() short-to-long flip: avg_cost and realized PnL correctness."""
+
+    def test_short_to_long_flip(self):
+        """Buying more than short quantity should flip to long with correct avg_cost."""
+        # Start short 100 shares at $150
+        pos = Position(ticker="AAPL", quantity=-100.0, avg_cost=150.0)
+
+        # Buy 150 shares at $140 — covers 100 short, goes long 50
+        order = Order(ticker="AAPL", side="BUY", quantity=150.0)
+        fill = Fill(
+            order=order,
+            fill_price=140.0,
+            fill_quantity=150.0,
+            commission=0.0,
+            timestamp=pd.Timestamp.now(),
+        )
+
+        pos.update(fill)
+
+        # After flip: long 50 shares
+        assert pos.quantity == 50.0
+        # Realized PnL from covering 100 short at $150 entry, $140 exit: 100 * (150-140) = +$1000
+        assert pos.realized_pnl == pytest.approx(1000.0, abs=0.01)
+        # New avg_cost for the long portion is the fill price
+        assert pos.avg_cost == pytest.approx(140.0, abs=0.01)
+
+    def test_long_to_short_flip(self):
+        """Selling more than long quantity should flip to short with correct avg_cost."""
+        # Start long 100 shares at $150
+        pos = Position(ticker="AAPL", quantity=100.0, avg_cost=150.0)
+
+        # Sell 150 shares at $160 — sells 100 long, goes short 50
+        order = Order(ticker="AAPL", side="SELL", quantity=150.0)
+        fill = Fill(
+            order=order,
+            fill_price=160.0,
+            fill_quantity=150.0,
+            commission=0.0,
+            timestamp=pd.Timestamp.now(),
+        )
+
+        pos.update(fill)
+
+        # After flip: short 50 shares
+        assert pos.quantity == -50.0
+        # Realized PnL from selling 100 long at $160 from $150 entry: 100 * (160-150) = +$1000
+        assert pos.realized_pnl == pytest.approx(1000.0, abs=0.01)
+        # New avg_cost for the short portion is the fill price
+        assert pos.avg_cost == pytest.approx(160.0, abs=0.01)
+
+    def test_exact_cover_zeros_position(self):
+        """Buying exactly the short quantity should zero out position."""
+        pos = Position(ticker="AAPL", quantity=-50.0, avg_cost=200.0)
+
+        order = Order(ticker="AAPL", side="BUY", quantity=50.0)
+        fill = Fill(
+            order=order,
+            fill_price=190.0,
+            fill_quantity=50.0,
+            commission=0.0,
+            timestamp=pd.Timestamp.now(),
+        )
+
+        pos.update(fill)
+
+        assert pos.quantity == 0.0
+        assert pos.avg_cost == 0.0
+        # Covered 50 short at $200 entry, $190 exit: 50 * (200-190) = +$500
+        assert pos.realized_pnl == pytest.approx(500.0, abs=0.01)
+
+
+class TestReconcileNoPriceSkip:
+    """T-NOPRICE: reconcile_target_weights silently skips stale position with no price."""
+
+    def test_stale_position_without_price_not_closed(self):
+        """Stale position (not in target weights) without a price should be skipped."""
+        bridge = ExecutionBridge(initial_capital=100000.0)
+
+        # Manually create a position for TSLA (stale — not in targets)
+        bridge.positions["TSLA"] = Position(ticker="TSLA", quantity=50.0, avg_cost=250.0)
+        bridge.equity = 100000.0
+
+        target_weights = {"AAPL": 0.5}
+        prices = {"AAPL": 200.0}  # No price for TSLA
+
+        fills = bridge.reconcile_target_weights(target_weights, prices)
+
+        # AAPL should have a fill
+        aapl_fills = [f for f in fills if f.order.ticker == "AAPL"]
+        assert len(aapl_fills) == 1
+
+        # TSLA position should remain untouched (no price to close it)
+        assert bridge.positions["TSLA"].quantity == 50.0
+
+    def test_stale_position_with_price_is_closed(self):
+        """Stale position (not in target weights) WITH a price should be closed."""
+        bridge = ExecutionBridge(initial_capital=100000.0)
+
+        bridge.positions["TSLA"] = Position(ticker="TSLA", quantity=50.0, avg_cost=250.0)
+        bridge.equity = 100000.0
+
+        target_weights = {"AAPL": 0.5}
+        prices = {"AAPL": 200.0, "TSLA": 260.0}  # Price available for TSLA
+
+        fills = bridge.reconcile_target_weights(target_weights, prices)
+
+        # TSLA should have a sell fill (closing stale position)
+        tsla_fills = [f for f in fills if f.order.ticker == "TSLA"]
+        assert len(tsla_fills) == 1
+        assert tsla_fills[0].order.side == "SELL"
+        assert tsla_fills[0].fill_quantity == 50.0
+
+
 class TestPaperTradingEngine:
     """Test PaperTradingEngine class."""
 

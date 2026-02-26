@@ -482,3 +482,73 @@ class TestPositionSizerVolatility:
         )
 
         assert size == 0.20  # Returns base_size when vol is 0
+
+
+class TestShortPositionRiskChecks:
+    """T-SHORT: Short positions (new_weight < 0) must trigger MAX_POSITION_SIZE and MAX_LEVERAGE."""
+
+    def test_short_position_triggers_max_position_size(self, risk_manager):
+        """A short position exceeding max_position_weight should fail MAX_POSITION_SIZE."""
+        checks = risk_manager.check_trade(
+            ticker="AAPL",
+            new_weight=-0.30,  # Short 30%, exceeds 25% limit
+            current_date="2024-01-01",
+        )
+
+        failed = [c for c in checks if not c.passed and c.rule == "MAX_POSITION_SIZE"]
+        assert len(failed) == 1
+        assert failed[0].severity == "critical"
+        assert failed[0].metric_value == pytest.approx(0.30, abs=0.01)
+
+    def test_small_short_passes_position_size(self, risk_manager):
+        """A small short within limits should pass position size check."""
+        checks = risk_manager.check_trade(
+            ticker="AAPL",
+            new_weight=-0.10,  # Short 10%, within 25% limit
+            current_date="2024-01-01",
+        )
+
+        pos_size_checks = [c for c in checks if c.rule == "POSITION_SIZE"]
+        assert len(pos_size_checks) == 1
+        assert pos_size_checks[0].passed is True
+
+    def test_short_position_triggers_max_leverage(self, risk_manager):
+        """Short positions increase gross exposure and should trigger MAX_LEVERAGE.
+
+        With max_leverage=1.0, a 50% long + 60% short = 110% gross > 100%.
+        """
+        risk_manager.current_weights = pd.Series({"MSFT": 0.50})
+
+        checks = risk_manager.check_trade(
+            ticker="AAPL",
+            new_weight=-0.60,  # Gross = |0.50| + |-0.60| = 1.10 > 1.0
+            current_date="2024-01-01",
+        )
+
+        leverage_checks = [c for c in checks if not c.passed and c.rule == "MAX_LEVERAGE"]
+        assert len(leverage_checks) == 1
+        assert leverage_checks[0].severity == "critical"
+
+    def test_short_within_leverage_limit_passes(self, risk_manager):
+        """A short that keeps gross exposure under leverage limit should pass."""
+        risk_manager.current_weights = pd.Series({"MSFT": 0.30})
+
+        checks = risk_manager.check_trade(
+            ticker="AAPL",
+            new_weight=-0.20,  # Gross = |0.30| + |-0.20| = 0.50 < 1.0
+            current_date="2024-01-01",
+        )
+
+        leverage_fails = [c for c in checks if not c.passed and c.rule == "MAX_LEVERAGE"]
+        assert len(leverage_fails) == 0
+
+    def test_short_can_execute_trade_blocked(self, risk_manager):
+        """can_execute_trade should block shorts exceeding position size."""
+        can_execute, issues = risk_manager.can_execute_trade(
+            ticker="AAPL",
+            new_weight=-0.30,  # Exceeds 25% limit
+            current_date="2024-01-01",
+        )
+
+        assert can_execute is False
+        assert len(issues) > 0

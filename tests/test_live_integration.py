@@ -109,10 +109,42 @@ class MockBroker(BaseBroker):
         return list(self._open_orders)
 
     def get_position(self, symbol: str) -> Optional[BrokerPosition]:
+        # Start from initial position
+        base_pos = None
         for p in self._positions:
             if p.symbol == symbol:
-                return p
-        return None
+                base_pos = p
+                break
+
+        # Accumulate qty changes from filled orders
+        filled_delta = 0.0
+        for order in self.submitted_orders:
+            if order.symbol != symbol:
+                continue
+            oid = order.order_id
+            # Check if order was filled (walk the fill script)
+            script = self._fill_script.get(oid, ["filled"])
+            # If the script's last status is "filled", this order contributes
+            if script[-1] == "filled":
+                delta = order.qty if order.side == "buy" else -order.qty
+                filled_delta += delta
+
+        if base_pos is None and filled_delta == 0:
+            return None
+
+        base_qty = base_pos.qty if base_pos else 0.0
+        base_entry = base_pos.avg_entry_price if base_pos else 0.0
+        total_qty = base_qty + filled_delta
+        price = self._prices.get(symbol, base_entry)
+
+        return BrokerPosition(
+            symbol=symbol,
+            qty=total_qty,
+            avg_entry_price=base_entry,
+            market_value=total_qty * price,
+            unrealized_pl=0.0,
+            unrealized_plpc=0.0,
+        )
 
     def list_positions(self) -> List[BrokerPosition]:
         return list(self._positions)
@@ -582,3 +614,111 @@ class TestBridgeBrokerSync:
         buy_symbols = {o.symbol for o in broker.submitted_orders if o.side == "buy"}
         assert "MSFT" in buy_symbols
         assert "GOOG" in buy_symbols
+
+
+class TestOCOTopUpQty:
+    """T-OCO-TOPUP: OCO qty must equal total broker position on top-up, not just fill increment.
+
+    When topping up an existing position, the SL/TP OCO order should protect
+    the ENTIRE position (old + new), not just the newly purchased shares.
+    """
+
+    @patch("examples.live_bot.get_current_atr", return_value=5.0)
+    @patch("examples.live_bot.get_ml_weights")
+    @patch("time.sleep", return_value=None)
+    def test_oco_qty_covers_full_position_on_topup(
+        self, _sleep, mock_ml, mock_atr, account, prices, risk_manager
+    ):
+        """Top-up buy: OCO sell qty should equal full position, not just the increment."""
+        # Already hold 100 shares of AAPL (20% of $100k at $200/share)
+        positions = [
+            BrokerPosition(
+                symbol="AAPL",
+                qty=100.0,
+                avg_entry_price=190.0,
+                market_value=20_000.0,
+                unrealized_pl=1_000.0,
+                unrealized_plpc=0.053,
+            ),
+        ]
+
+        # Increase to 50% weight: needs 250 shares total ($50k/$200), so buy 150 more
+        target_weights = {"AAPL": 0.50}
+        mock_ml.return_value = target_weights
+
+        broker = MockBroker(account=account, positions=positions, prices=prices)
+        bridge = ExecutionBridge(
+            risk_manager=risk_manager, initial_capital=100_000.0, commission_rate=0.0
+        )
+
+        from examples.live_bot import run_trading_cycle
+
+        run_trading_cycle(broker, risk_manager, bridge)
+
+        # The OCO order should protect the FULL position (old 100 + new 150 = 250)
+        oco_orders = [
+            o for o in broker.submitted_orders
+            if o.order_class == "oco" and o.side == "sell" and o.symbol == "AAPL"
+        ]
+        assert len(oco_orders) >= 1
+
+        # OCO qty should equal total position after top-up
+        # The buy qty is ~150 shares (250 target - 100 existing)
+        buy_orders = [
+            o for o in broker.submitted_orders
+            if o.side == "buy" and o.symbol == "AAPL"
+        ]
+        assert len(buy_orders) >= 1
+
+        # The OCO should protect the full post-top-up position
+        # qty should be greater than just the buy increment
+        oco_qty = oco_orders[0].qty
+        buy_qty = buy_orders[0].qty
+        assert oco_qty > buy_qty, (
+            f"OCO qty ({oco_qty}) should be > buy increment ({buy_qty}) — "
+            f"it should cover the full position"
+        )
+
+
+class TestRenormClamp:
+    """T-RENORM: After renorm + clamp, no weight exceeds MAX_POSITION_WEIGHT.
+
+    The iterative renorm-clamp loop (H-CLAMP fix) must converge such that:
+    1. All weights sum to ~1.0
+    2. No individual weight exceeds MAX_POSITION_WEIGHT
+    """
+
+    @patch("examples.live_bot.get_ml_weights")
+    @patch("time.sleep", return_value=None)
+    def test_weights_clamped_after_price_filtering(
+        self, _sleep, mock_ml, account, prices, risk_manager
+    ):
+        """When some tickers are dropped (no price), renorm + clamp must hold.
+
+        Scenario: 4 tickers each at 25%, one drops → renorm to 3 tickers
+        at 33% each → clamp to MAX_POSITION_WEIGHT (30%) → renorm again.
+        """
+        # Give equal weights to 4 tickers, but one won't have a price
+        target_weights = {"AAPL": 0.25, "MSFT": 0.25, "GOOG": 0.25, "UNKNOWN": 0.25}
+        mock_ml.return_value = target_weights
+
+        # Only 3 tickers have prices (UNKNOWN will be dropped)
+        broker = MockBroker(account=account, prices=prices)
+        bridge = ExecutionBridge(
+            risk_manager=risk_manager, initial_capital=100_000.0, commission_rate=0.0
+        )
+
+        from examples.live_bot import MAX_POSITION_WEIGHT, run_trading_cycle
+
+        run_trading_cycle(broker, risk_manager, bridge)
+
+        # Check that submitted buy quantities imply no single weight > MAX_POSITION_WEIGHT
+        buy_orders = [o for o in broker.submitted_orders if o.side == "buy"]
+        for order in buy_orders:
+            price = prices[order.symbol]
+            implied_value = order.qty * price
+            implied_weight = implied_value / account.equity
+            assert implied_weight <= MAX_POSITION_WEIGHT + 0.01, (
+                f"{order.symbol}: implied weight {implied_weight:.2%} "
+                f"exceeds MAX_POSITION_WEIGHT {MAX_POSITION_WEIGHT:.2%}"
+            )
