@@ -198,12 +198,12 @@ class TestTradeValidation:
 class TestMaxSingleTradeSize:
     """Test MAX_SINGLE_TRADE_SIZE check (M4 fix).
 
-    This check warns when a single trade's weight change exceeds
-    max_single_trade_size. Severity is 'warning', not 'critical',
-    so it won't block trades via can_execute_trade().
+    This check blocks when a single trade's weight change exceeds
+    max_single_trade_size. Severity is 'critical' (C-WARN fix)
+    so it blocks trades via can_execute_trade().
     """
 
-    def test_large_trade_from_zero_triggers_warning(self, risk_manager):
+    def test_large_trade_from_zero_triggers_critical(self, risk_manager):
         """Opening a new 20% position exceeds 15% single trade limit."""
         risk_manager.current_weights = pd.Series({"MSFT": 0.10})
 
@@ -216,7 +216,7 @@ class TestMaxSingleTradeSize:
         trade_size_checks = [c for c in checks if c.rule == "MAX_SINGLE_TRADE_SIZE"]
         assert len(trade_size_checks) == 1
         assert trade_size_checks[0].passed is False
-        assert trade_size_checks[0].severity == "warning"
+        assert trade_size_checks[0].severity == "critical"
 
     def test_small_trade_passes(self, risk_manager):
         """A 10% weight change is within 15% limit."""
@@ -246,9 +246,9 @@ class TestMaxSingleTradeSize:
         assert len(trade_size_checks) == 1
         assert trade_size_checks[0].passed is False
 
-    def test_no_current_weights_uses_absolute(self, risk_manager):
-        """When current_weights is None, uses absolute new_weight as trade size."""
-        risk_manager.current_weights = None
+    def test_empty_current_weights_uses_absolute(self, risk_manager):
+        """When current_weights is empty Series (C-INIT fix), uses absolute new_weight."""
+        risk_manager.current_weights = pd.Series(dtype=float)
 
         checks = risk_manager.check_trade(
             ticker="AAPL",
@@ -260,8 +260,8 @@ class TestMaxSingleTradeSize:
         assert len(trade_size_checks) == 1
         assert trade_size_checks[0].passed is False
 
-    def test_warning_does_not_block_trade(self, risk_manager):
-        """MAX_SINGLE_TRADE_SIZE is severity=warning, so can_execute_trade still True."""
+    def test_critical_blocks_trade(self, risk_manager):
+        """MAX_SINGLE_TRADE_SIZE is severity=critical (C-WARN fix), so it blocks."""
         risk_manager.current_weights = pd.Series({"MSFT": 0.10})
 
         can_execute, issues = risk_manager.can_execute_trade(
@@ -270,8 +270,9 @@ class TestMaxSingleTradeSize:
             current_date="2024-01-01",
         )
 
-        # Should still be allowed (warning, not critical)
-        assert can_execute is True
+        # Should be blocked (critical severity - C-WARN fix)
+        assert can_execute is False
+        assert any("single-trade" in i.lower() or "trade size" in i.lower() for i in issues)
 
 
 class TestCanExecuteTrade:
@@ -279,9 +280,11 @@ class TestCanExecuteTrade:
 
     def test_can_execute_valid_trade(self, risk_manager):
         """Test that valid trades can execute."""
+        # Set existing weight so trade size (0.10 change) is within 0.15 limit
+        risk_manager.current_weights = pd.Series({"AAPL": 0.05})
         can_execute, issues = risk_manager.can_execute_trade(
             ticker="AAPL",
-            new_weight=0.20,
+            new_weight=0.15,
             current_date="2024-01-01",
         )
 

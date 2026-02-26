@@ -80,7 +80,7 @@ class RiskManager:
         self.daily_trades: Dict[str, int] = {}
         self.daily_turnover: Dict[str, float] = {}
         self.risk_engine: Optional[RiskEngine] = None
-        self.current_weights: Optional[pd.Series] = None
+        self.current_weights: pd.Series = pd.Series(dtype=float)
 
     def initialize_portfolio_risk(
         self,
@@ -199,7 +199,7 @@ class RiskManager:
                     rule="MAX_SINGLE_TRADE_SIZE",
                     message=f"Trade size {trade_size:.1%} exceeds single-trade limit of "
                     f"{self.limits.max_single_trade_size:.1%}",
-                    severity="warning",
+                    severity="critical",
                     metric_value=trade_size,
                     limit_value=self.limits.max_single_trade_size,
                 )
@@ -285,11 +285,12 @@ class RiskManager:
 
         # 6. Sector weight limit (Fix #17)
         sector = self.sector_map.get(ticker)
-        if sector and self.current_weights is not None:
-            # Sum weights of all tickers in the same sector
+        if sector and not self.current_weights.empty:
+            # Sum absolute weights for gross sector exposure (C-SECTOR fix)
             sector_tickers = [t for t, s in self.sector_map.items() if s == sector and t != ticker]
             sector_weight = (
-                sum(self.current_weights.get(t, 0.0) for t in sector_tickers) + new_weight
+                sum(abs(self.current_weights.get(t, 0.0)) for t in sector_tickers)
+                + abs(new_weight)
             )
             if sector_weight > self.limits.max_sector_weight:
                 checks.append(
@@ -298,21 +299,37 @@ class RiskManager:
                         rule="MAX_SECTOR_WEIGHT",
                         message=f"Sector '{sector}' weight {sector_weight:.1%} exceeds "
                         f"limit {self.limits.max_sector_weight:.1%}",
-                        severity="warning",
+                        severity="critical",
                         metric_value=sector_weight,
                         limit_value=self.limits.max_sector_weight,
+                    )
+                )
+            else:
+                checks.append(
+                    RiskCheck(
+                        passed=True,
+                        rule="SECTOR_WEIGHT",
+                        message=f"Sector '{sector}' weight {sector_weight:.1%} within limits",
+                        severity="info",
                     )
                 )
 
         return checks
 
-    def check_portfolio_risk(self, weights: pd.Series) -> List[RiskCheck]:
+    def check_portfolio_risk(
+        self,
+        weights: pd.Series,
+        live_equity_curve: Optional[List[float]] = None,
+    ) -> List[RiskCheck]:
         """
         Check overall portfolio risk metrics.
 
         Args:
             weights: Current portfolio weights (used for context, risk engine
                      uses its own internal state for calculations).
+            live_equity_curve: Optional list of equity values from ExecutionBridge.
+                If provided, drawdown is computed from live data instead of
+                historical yfinance data (C-DD fix).
 
         Returns:
             List of RiskCheck results
@@ -337,8 +354,16 @@ class RiskManager:
                 )
             )
 
-        # 2. Drawdown limit
-        max_dd = abs(self.risk_engine.max_drawdown())
+        # 2. Drawdown limit (C-DD fix: prefer live equity curve over historical)
+        if live_equity_curve and len(live_equity_curve) >= 2:
+            import numpy as np
+
+            equity_arr = np.array(live_equity_curve)
+            running_max = np.maximum.accumulate(equity_arr)
+            drawdowns = (equity_arr - running_max) / running_max
+            max_dd = abs(float(drawdowns.min()))
+        else:
+            max_dd = abs(self.risk_engine.max_drawdown())
         if max_dd > self.limits.max_drawdown_limit:
             checks.append(
                 RiskCheck(

@@ -20,6 +20,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -90,10 +91,11 @@ def should_rebalance_today() -> bool:
 
     Weekly: only trade on REBALANCE_DAY (default Wednesday).
     Daily: always trade (original behavior).
+    H-TZ fix: use Eastern Time (market timezone) instead of naive local time.
     """
     if REBALANCE_FREQUENCY == "daily":
         return True
-    return datetime.now().weekday() == REBALANCE_DAY
+    return datetime.now(tz=ZoneInfo("America/New_York")).weekday() == REBALANCE_DAY
 
 
 def _get_next_rebalance_date() -> datetime:
@@ -694,39 +696,41 @@ def run_trading_cycle(
                 and result["filled_avg_price"] is not None
                 and actual_qty > 0
             ):
+                # C-OCO-2 fix: compute sl_tp_qty and sl_price unconditionally
+                # before OCO try block so fallback always has valid values.
+                fill_price = float(result["filled_avg_price"])
+
+                # C4 fix: get total position qty from broker for SL/TP sizing
+                try:
+                    total_pos = broker.get_position(entry["symbol"])
+                    sl_tp_qty = round(abs(total_pos.qty), 4) if total_pos else actual_qty
+                except Exception:
+                    sl_tp_qty = actual_qty
+
+                # Try ATR-based stops first, fall back to fixed %
+                atr = get_current_atr(entry["symbol"])
+                if atr is not None and atr > 0:
+                    sl_price = round(fill_price - (ATR_SL_MULTIPLIER * atr), 2)
+                    tp_price = round(fill_price + (ATR_TP_MULTIPLIER * atr), 2)
+                    sl_label = f"{ATR_SL_MULTIPLIER}x ATR ({atr:.2f})"
+                else:
+                    sl_price = round(fill_price * (1 - STOP_LOSS_PCT), 2)
+                    tp_price = round(fill_price * (1 + TAKE_PROFIT_PCT), 2)
+                    sl_label = f"{STOP_LOSS_PCT:.0%} fixed (ATR unavailable)"
+
+                # Sanity: SL must be below fill, TP must be above
+                if sl_price >= fill_price:
+                    sl_price = round(fill_price * (1 - STOP_LOSS_PCT), 2)
+                    sl_label = f"{STOP_LOSS_PCT:.0%} fixed (ATR sanity fallback)"
+                if tp_price <= fill_price:
+                    tp_price = round(fill_price * (1 + TAKE_PROFIT_PCT), 2)
+
                 try:
                     # Cancel any existing SL/TP orders for this symbol to prevent
                     # order accumulation across trading cycles (P0-1 fix)
                     _cancel_existing_sl_tp_orders(broker, entry["symbol"])
 
-                    fill_price = float(result["filled_avg_price"])
-
-                    # C4 fix: get total position qty from broker for SL/TP sizing
-                    try:
-                        total_pos = broker.get_position(entry["symbol"])
-                        sl_tp_qty = round(abs(total_pos.qty), 4) if total_pos else actual_qty
-                    except Exception:
-                        sl_tp_qty = actual_qty
-
-                    # Try ATR-based stops first, fall back to fixed %
-                    atr = get_current_atr(entry["symbol"])
-                    if atr is not None and atr > 0:
-                        sl_price = round(fill_price - (ATR_SL_MULTIPLIER * atr), 2)
-                        tp_price = round(fill_price + (ATR_TP_MULTIPLIER * atr), 2)
-                        sl_label = f"{ATR_SL_MULTIPLIER}x ATR ({atr:.2f})"
-                    else:
-                        sl_price = round(fill_price * (1 - STOP_LOSS_PCT), 2)
-                        tp_price = round(fill_price * (1 + TAKE_PROFIT_PCT), 2)
-                        sl_label = f"{STOP_LOSS_PCT:.0%} fixed (ATR unavailable)"
-
-                    # Sanity: SL must be below fill, TP must be above
-                    if sl_price >= fill_price:
-                        sl_price = round(fill_price * (1 - STOP_LOSS_PCT), 2)
-                        sl_label = f"{STOP_LOSS_PCT:.0%} fixed (ATR sanity fallback)"
-                    if tp_price <= fill_price:
-                        tp_price = round(fill_price * (1 + TAKE_PROFIT_PCT), 2)
-
-                    # C1 fix: submit SL+TP as OCO pair (one-cancels-other).
+                    # C1/C-OCO-1 fix: submit SL+TP as OCO pair (one-cancels-other).
                     # When SL fills, TP is automatically cancelled (and vice versa),
                     # preventing orphaned orders from creating naked short positions.
                     oco_order = BrokerOrder(
@@ -737,6 +741,7 @@ def run_trading_cycle(
                         limit_price=tp_price,
                         time_in_force="gtc",
                         order_class="oco",
+                        take_profit_limit_price=tp_price,
                         stop_loss_stop_price=sl_price,
                     )
                     oco_id = broker.submit_order(oco_order)
@@ -752,11 +757,9 @@ def run_trading_cycle(
                         sl_order = BrokerOrder(
                             symbol=entry["symbol"],
                             side="sell",
-                            qty=sl_tp_qty if 'sl_tp_qty' in dir() else actual_qty,
+                            qty=sl_tp_qty,
                             order_type="stop",
-                            stop_price=sl_price if 'sl_price' in dir() else round(
-                                float(result["filled_avg_price"]) * (1 - STOP_LOSS_PCT), 2
-                            ),
+                            stop_price=sl_price,
                             time_in_force="gtc",
                         )
                         broker.submit_order(sl_order)
@@ -907,7 +910,9 @@ def main():
         logger.info("No previous bot state found — starting fresh.")
 
     # Check if we've already traded today (duplicate execution guard - P0-5)
-    if _has_traded_today(broker):
+    # C-STARTUP fix: only exit on non-rebalance days if we've done entry trades.
+    # GTC SL/TP fills on non-rebalance days should not cause early exit.
+    if should_rebalance_today() and _has_traded_today(broker):
         logger.info("Already traded today. Exiting to prevent duplicate execution.")
         broker.disconnect()
         sys.exit(0)
@@ -973,7 +978,11 @@ def main():
                     )
                 else:
                     weights = pd.Series()
-                risk_checks = risk_manager.check_portfolio_risk(weights)
+                # C-DD fix: pass live equity curve for accurate drawdown calc
+                live_eq = [pt["equity"] for pt in bridge.equity_curve]
+                risk_checks = risk_manager.check_portfolio_risk(
+                    weights, live_equity_curve=live_eq
+                )
                 critical_violations = [
                     c for c in risk_checks if not c.passed and c.severity == "critical"
                 ]
