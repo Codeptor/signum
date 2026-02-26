@@ -178,6 +178,9 @@ class ExecutionBridge:
                 weight_change = (
                     (fill.fill_quantity * fill.fill_price) / self.equity if self.equity > 0 else 0
                 )
+                # Negate weight for sells so risk manager tracks correctly
+                if fill.order.side == "SELL":
+                    weight_change = -weight_change
                 self.risk_manager.record_trade(ticker, weight_change, current_date)
 
         return fill
