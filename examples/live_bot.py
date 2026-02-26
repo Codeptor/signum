@@ -17,6 +17,8 @@ import sys
 import time
 from datetime import datetime
 
+import pandas as pd
+
 from python.alpha.predict import get_ml_weights
 from python.bridge.execution import ExecutionBridge
 from python.brokers.alpaca_broker import AlpacaBroker
@@ -43,6 +45,58 @@ STOP_LOSS_PCT = 0.05  # 5% trailing stop-loss from entry price
 TAKE_PROFIT_PCT = 0.15  # 15% take-profit from entry price
 SLEEP_AFTER_TRADE_HOURS = 12
 SLEEP_MARKET_CLOSED_HOURS = 1
+
+
+def _initialize_risk_engine(broker: AlpacaBroker, risk_manager: RiskManager) -> None:
+    """Initialize the risk engine with historical returns for current positions.
+
+    Without this, all risk checks (VaR, drawdown, volatility) are no-ops
+    because risk_engine remains None.
+    """
+    positions = broker.list_positions()
+    if not positions:
+        logger.info("No positions — skipping risk engine initialization.")
+        return
+
+    symbols = [p.symbol for p in positions]
+    total_value = sum(p.market_value for p in positions)
+
+    if total_value <= 0:
+        logger.warning("Total position value <= 0 — skipping risk engine init.")
+        return
+
+    weights = pd.Series({p.symbol: p.market_value / total_value for p in positions})
+
+    # Fetch 1-year of daily bars for portfolio risk calc
+    try:
+        import yfinance as yf
+
+        data = yf.download(symbols, period="1y", interval="1d", progress=False)
+        if data is not None and len(data) > 0:
+            close_raw = data["Close"]
+            close: pd.DataFrame = (
+                close_raw.to_frame(name=symbols[0])
+                if isinstance(close_raw, pd.Series)
+                else pd.DataFrame(close_raw)
+            )
+            returns = close.pct_change().dropna()
+            # Align weights to available columns
+            available = [s for s in symbols if s in returns.columns]
+            if available:
+                returns_df = pd.DataFrame(returns[available])
+                risk_manager.initialize_portfolio_risk(
+                    returns=returns_df,
+                    weights=weights.reindex(available).fillna(0),
+                )
+                logger.info(
+                    f"Risk engine initialized with {len(available)} positions, "
+                    f"{len(returns)} days of history."
+                )
+                return
+    except Exception as e:
+        logger.warning(f"Failed to initialize risk engine: {e}")
+
+    logger.warning("Risk engine could not be initialized — risk checks will be no-ops.")
 
 
 def run_trading_cycle(broker: AlpacaBroker, risk_manager: RiskManager) -> bool:
@@ -228,12 +282,30 @@ def main():
     )
     risk_manager = RiskManager(limits=risk_limits)
 
+    # Initialize risk engine with current positions' historical data
+    _initialize_risk_engine(broker, risk_manager)
+
     try:
         while True:
             clock = broker.get_clock()
             is_open = clock["is_open"]
 
             if is_open:
+                # Re-initialize risk engine each cycle to capture new positions
+                _initialize_risk_engine(broker, risk_manager)
+
+                # Check portfolio-level risk before trading
+                risk_checks = risk_manager.check_portfolio_risk(pd.Series())
+                critical_violations = [
+                    c for c in risk_checks if not c.passed and c.severity == "critical"
+                ]
+                if critical_violations:
+                    for v in critical_violations:
+                        logger.warning(f"RISK VIOLATION: {v.rule} — {v.message}")
+                    logger.warning("Skipping trade cycle due to critical risk violations.")
+                    time.sleep(60 * 30)
+                    continue
+
                 traded = run_trading_cycle(broker, risk_manager)
 
                 if traded:
