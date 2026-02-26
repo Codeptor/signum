@@ -203,7 +203,7 @@ class TestConnectionLifecycle:
         assert b.is_connected() is True
 
     def test_connect_failure(self, disconnected_broker):
-        """M-CONNECT fix: connect now raises (retried by @_retry_read) instead of returning False."""
+        """M-CONNECT: connect now raises (retried by @_retry_read)."""
         import pytest
 
         b, mock_rest = disconnected_broker
@@ -338,14 +338,12 @@ class TestClientOrderIdIdempotency:
 
     def test_changes_across_days(self):
         """When the date changes, the id changes."""
-        from datetime import date as real_date
+        from datetime import datetime as real_datetime
+        from datetime import timezone
 
         from python.brokers.alpaca_broker import AlpacaBroker
 
         order = BrokerOrder(symbol="AAPL", side="buy", qty=10, order_type="market")
-
-        # H-IDTZ fix: code now uses datetime.now(timezone.utc), patch datetime
-        from datetime import datetime as real_datetime, timezone
 
         fake_dt_1 = MagicMock(wraps=real_datetime)
         fake_dt_1.now.return_value = real_datetime(2026, 1, 1, tzinfo=timezone.utc)
