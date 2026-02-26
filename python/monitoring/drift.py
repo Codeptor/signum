@@ -43,12 +43,24 @@ class DriftDetector:
 
     @staticmethod
     def _psi(reference: pd.Series, current: pd.Series, bins: int = 10) -> float:
-        """Population Stability Index."""
-        breakpoints = np.linspace(
-            min(reference.min(), current.min()),
-            max(reference.max(), current.max()),
-            bins + 1,
-        )
+        """Population Stability Index.
+
+        Bin edges are derived from reference distribution quantiles (Fix #41)
+        so that results are stable regardless of the current distribution's
+        range.  Values outside the reference range fall into the first/last bin.
+        """
+        # Use reference quantiles for bin edges — ensures stable bins
+        quantiles = np.linspace(0, 1, bins + 1)
+        breakpoints = np.quantile(reference.dropna(), quantiles)
+        # Ensure monotonically increasing (can have ties in low-cardinality data)
+        breakpoints = np.unique(breakpoints)
+        if len(breakpoints) < 3:
+            # Not enough distinct values to compute PSI meaningfully
+            return 0.0
+        # Extend edges to capture any out-of-range values in current
+        breakpoints[0] = -np.inf
+        breakpoints[-1] = np.inf
+
         ref_counts = np.histogram(reference, bins=breakpoints)[0] / len(reference)
         cur_counts = np.histogram(current, bins=breakpoints)[0] / len(current)
 
