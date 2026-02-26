@@ -34,10 +34,41 @@ YFINANCE_TIMEOUT = 30
     reraise=True,
 )
 def fetch_sp500_tickers() -> list[str]:
-    """Fetch current S&P 500 constituent tickers from Wikipedia."""
+    """Fetch current S&P 500 constituent tickers from Wikipedia.
+
+    H12 fix: the scraping is made more robust against Wikipedia table
+    structure changes by searching all tables for one containing a
+    column with "Symbol" or "Ticker" in its name (case-insensitive),
+    rather than hardcoding ``[0]`` and ``"Symbol"``.
+    """
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    table = pd.read_html(url, storage_options={"User-Agent": "quant-platform/0.1"})[0]
-    return sorted(table["Symbol"].str.replace(".", "-", regex=False).tolist())
+    tables = pd.read_html(url, storage_options={"User-Agent": "quant-platform/0.1"})
+
+    # H12 fix: search tables for a column that looks like ticker symbols
+    symbol_col = None
+    target_table = None
+    for tbl in tables:
+        for col in tbl.columns:
+            col_lower = str(col).lower()
+            if col_lower in ("symbol", "ticker", "ticker symbol"):
+                target_table = tbl
+                symbol_col = col
+                break
+        if target_table is not None:
+            break
+
+    if target_table is None or symbol_col is None:
+        # Fallback to original behaviour if heuristic fails
+        logger.warning(
+            "Could not find symbol column by name; falling back to first table, 'Symbol' column"
+        )
+        target_table = tables[0]
+        symbol_col = "Symbol"
+
+    tickers = target_table[symbol_col].str.replace(".", "-", regex=False).tolist()
+    # Filter out any non-string or NaN entries
+    tickers = [t for t in tickers if isinstance(t, str) and len(t) > 0]
+    return sorted(tickers)
 
 
 @retry(
@@ -70,6 +101,26 @@ def fetch_ohlcv(
     high_nan = nan_frac[nan_frac > 0.05]
     if not high_nan.empty:
         logger.warning(f"Columns with >5%% NaN after download:\n{high_nan}")
+
+    # M13 fix: detect tickers whose data is entirely NaN (download failed silently).
+    # yfinance with threads=True swallows per-ticker errors and returns NaN columns.
+    if isinstance(df.columns, pd.MultiIndex):
+        ticker_level = df.columns.get_level_values(0).unique()
+        all_nan_tickers = []
+        for t in ticker_level:
+            if df[t].isna().all().all():
+                all_nan_tickers.append(t)
+        if all_nan_tickers:
+            logger.warning(
+                f"M13: {len(all_nan_tickers)} tickers returned entirely NaN data "
+                f"(likely failed silently): {all_nan_tickers[:20]}..."
+                if len(all_nan_tickers) > 20
+                else f"M13: {len(all_nan_tickers)} tickers returned entirely NaN data: "
+                f"{all_nan_tickers}"
+            )
+            # Drop entirely-NaN tickers to prevent corrupted downstream features
+            df = df.drop(columns=all_nan_tickers, level=0)
+
     # Forward-fill small gaps (weekends/holidays already absent), then drop
     # any remaining rows that are entirely NaN for a ticker.
     df = df.ffill(limit=3)
@@ -87,7 +138,17 @@ def fetch_ohlcv(
     reraise=True,
 )
 def fetch_fred_macro() -> pd.DataFrame:
-    """Fetch key macro indicators from FRED via yfinance."""
+    """Fetch key macro indicators via Yahoo Finance index proxies.
+
+    H13 note: despite the function name, this does NOT use the FRED API.
+    It downloads Yahoo Finance index tickers (``^VIX``, ``^TNX``, ``^IRX``)
+    which have no SLA and may be renamed, removed, or return stale data.
+    A proper fix would use the ``fredapi`` package with a FRED API key,
+    but that requires registration.  For paper trading this is acceptable.
+
+    Forward-fill is limited to 5 days to prevent stale data from persisting
+    indefinitely during extended outages.
+    """
     macro_tickers = {
         "^VIX": "vix",
         "^TNX": "us10y",
@@ -95,19 +156,31 @@ def fetch_fred_macro() -> pd.DataFrame:
     }
     frames = {}
     for ticker, name in macro_tickers.items():
-        data = yf.download(
-            ticker, period=DEFAULT_PERIOD, interval=DEFAULT_INTERVAL, timeout=YFINANCE_TIMEOUT
-        )
-        close = data["Close"]
-        # yfinance may return DataFrame instead of Series; squeeze to 1-D
-        if isinstance(close, pd.DataFrame):
-            close = close.squeeze(axis=1)
-        if close.isna().sum() > 0:
-            logger.warning(
-                f"Macro ticker {ticker}: {close.isna().sum()} NaN values — forward-filling"
+        try:
+            data = yf.download(
+                ticker, period=DEFAULT_PERIOD, interval=DEFAULT_INTERVAL, timeout=YFINANCE_TIMEOUT
             )
-            close = close.ffill()
-        frames[name] = close
+            if data is None or data.empty:
+                logger.warning(f"Macro ticker {ticker} ({name}): no data returned, skipping")
+                continue
+            close = data["Close"]
+            # yfinance may return DataFrame instead of Series; squeeze to 1-D
+            if isinstance(close, pd.DataFrame):
+                close = close.squeeze(axis=1)
+            nan_count = int(close.isna().sum())
+            if nan_count > 0:
+                logger.warning(
+                    f"Macro ticker {ticker}: {nan_count} NaN values — forward-filling (limit=5)"
+                )
+                # H13 fix: limit ffill to 5 days so stale data doesn't persist indefinitely
+                close = close.ffill(limit=5)
+            frames[name] = close
+        except Exception as e:
+            logger.warning(f"Failed to fetch macro ticker {ticker} ({name}): {e}")
+            continue
+
+    if not frames:
+        raise ValueError("All macro ticker downloads failed — cannot build macro DataFrame")
     return pd.DataFrame(frames)
 
 

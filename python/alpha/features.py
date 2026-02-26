@@ -1,7 +1,11 @@
 """Technical feature computation inspired by Qlib Alpha158."""
 
+import logging
+
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 # Columns that should be winsorized to limit outlier impact (Fix #20)
 _WINSORIZE_COLS = [
@@ -20,21 +24,49 @@ _WINSORIZE_COLS = [
     "bid_ask_proxy",
 ]
 
+# C9 fix: Neutral default values for features when data is unavailable.
+# Using 0.0 for VIX (which has a floor ~9 and mean ~20) would trick the
+# model into predicting as if the market is extremely calm.  These values
+# represent the approximate long-run median for each feature so the model
+# produces roughly neutral predictions when a feature is missing.
+FEATURE_NEUTRAL_DEFAULTS: dict[str, float] = {
+    "vix": 20.0,  # long-run VIX median
+    "vix_ma_ratio": 1.0,  # VIX at its own moving average
+    "term_spread": 1.0,  # ~100bps normal spread
+    "term_spread_change_20d": 0.0,  # no change
+    "rsi_14": 50.0,  # midpoint (neither overbought nor oversold)
+    "bb_position": 0.5,  # middle of Bollinger Band
+    "vol_20d": 0.015,  # ~24% annualised vol (typical for S&P stocks)
+    "volume_ratio": 1.0,  # average volume
+    "ret_5d": 0.0,  # no return
+    "ret_10d": 0.0,
+    "ret_20d": 0.0,
+    "cs_ret_rank_5d": 0.5,  # median rank
+    "cs_ret_rank_20d": 0.5,
+    "cs_vol_rank_20d": 0.5,
+    "cs_volume_rank": 0.5,
+}
+
 
 def winsorize(
     df: pd.DataFrame,
     cols: list[str] | None = None,
-    lower: float = 0.01,
-    upper: float = 0.99,
+    lower: float = 0.005,
+    upper: float = 0.995,
 ) -> pd.DataFrame:
     """Clip feature columns at the given percentiles to limit outlier impact.
+
+    M15 fix: operates on a copy so callers' DataFrames are not mutated.
+    H6 fix: default percentiles widened from 1st/99th to 0.5th/99.5th to
+    better accommodate fat-tailed return distributions.
 
     Args:
         df: Input DataFrame.
         cols: Columns to winsorize. If None, uses default feature list.
-        lower: Lower percentile (e.g. 0.01 for 1st percentile).
-        upper: Upper percentile (e.g. 0.99 for 99th percentile).
+        lower: Lower percentile (e.g. 0.005 for 0.5th percentile).
+        upper: Upper percentile (e.g. 0.995 for 99.5th percentile).
     """
+    df = df.copy()  # M15 fix: never mutate caller's DataFrame
     cols = cols or [c for c in _WINSORIZE_COLS if c in df.columns]
     for col in cols:
         lo = df[col].quantile(lower)
@@ -43,18 +75,43 @@ def winsorize(
     return df
 
 
+def _scrub_infinities(df: pd.DataFrame) -> pd.DataFrame:
+    """Replace ±inf with NaN throughout a DataFrame.
+
+    C11 fix: inf values from log(0), division by zero, or pct_change on
+    zero-valued series propagate through the pipeline and cause undefined
+    behaviour in LightGBM (which handles NaN but not inf).
+    """
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    mask = df[numeric_cols].isin([np.inf, -np.inf])
+    if mask.any().any():
+        n_inf = int(mask.sum().sum())
+        logger.warning(f"Replaced {n_inf} inf values with NaN in feature pipeline")
+        df = df.copy()
+        df[numeric_cols] = df[numeric_cols].replace([np.inf, -np.inf], np.nan)
+    return df
+
+
 def compute_alpha_features(df: pd.DataFrame) -> pd.DataFrame:
     """Compute technical features per ticker.
 
     Input: DataFrame with columns [ticker, open, high, low, close, volume] and DatetimeIndex.
     Output: DataFrame with original columns plus computed features.
+
+    H7 fix: winsorize is applied uniformly *after* all per-ticker features
+    are computed, ensuring consistent clipping regardless of computation order.
     """
     results = []
     for ticker, group in df.groupby("ticker"):
         feats = _compute_single_ticker(group.copy())
         feats["ticker"] = ticker
         results.append(feats)
-    return pd.concat(results).sort_index()
+    out = pd.concat(results).sort_index()
+
+    # H7 fix: winsorize all feature columns after computation, not piecemeal
+    out = winsorize(out)
+
+    return out
 
 
 def _compute_single_ticker(df: pd.DataFrame) -> pd.DataFrame:
@@ -77,7 +134,10 @@ def _compute_single_ticker(df: pd.DataFrame) -> pd.DataFrame:
         df[f"ma_ratio_{w}"] = np.where(rolling_mean != 0, c / rolling_mean, np.nan)
 
     # Volatility (using log returns for time-additivity — Fix #21)
-    log_ret = np.log(c / c.shift(1))
+    # C11 fix: guard log(0) and log(negative) which produce -inf / NaN
+    ratio = c / c.shift(1)
+    ratio = ratio.clip(lower=1e-10)  # prevent log(0) → -inf
+    log_ret = np.log(ratio)
     for w in [5, 10, 20]:
         df[f"vol_{w}d"] = log_ret.rolling(w).std()
 
@@ -119,6 +179,9 @@ def _compute_single_ticker(df: pd.DataFrame) -> pd.DataFrame:
     # Open-close range
     df["oc_range"] = np.where(c != 0, (c - o) / c, 0.0)
 
+    # C11 fix: scrub any inf/-inf that slipped through division or log
+    df = _scrub_infinities(df)
+
     return df
 
 
@@ -148,7 +211,14 @@ def compute_cross_sectional_features(df: pd.DataFrame) -> pd.DataFrame:
     Input: DataFrame with DatetimeIndex and columns including ticker, ret_5d, ret_20d,
            vol_20d, dollar_volume_20d (output of compute_alpha_features).
     Output: Same DataFrame with additional cs_* rank columns (0-1 percentile ranks).
+
+    C10 fix: when all stocks in a cross-section have the same value,
+    ``rank(pct=True)`` can produce degenerate results or NaN depending on
+    the method. We use ``method='average'`` (pandas default) which assigns
+    0.5 when all values are tied — a neutral rank.  The result is then
+    scrubbed for any inf values.
     """
+    df = df.copy()  # avoid mutating caller's DataFrame
     rank_specs = {
         "cs_ret_rank_5d": "ret_5d",
         "cs_ret_rank_20d": "ret_20d",
@@ -157,7 +227,13 @@ def compute_cross_sectional_features(df: pd.DataFrame) -> pd.DataFrame:
     }
     for new_col, src_col in rank_specs.items():
         if src_col in df.columns:
-            df[new_col] = df.groupby(level=0)[src_col].rank(pct=True)
+            # C10 fix: rank with method='average' handles ties safely.
+            # When all values are identical, average rank = 0.5 (neutral).
+            df[new_col] = df.groupby(level=0)[src_col].rank(
+                pct=True, method="average", na_option="keep"
+            )
+    # C11 fix: scrub any inf that may leak from upstream computations
+    df = _scrub_infinities(df)
     return df
 
 

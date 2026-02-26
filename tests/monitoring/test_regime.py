@@ -1,8 +1,13 @@
 """Tests for market regime detection (Phase 2.2)."""
 
+import pandas as pd
 import pytest
 
-from python.monitoring.regime import RegimeDetector, RegimeState
+from python.monitoring.regime import (
+    RegimeDetector,
+    RegimeState,
+    _extract_close_series,
+)
 
 
 @pytest.fixture
@@ -117,3 +122,119 @@ class TestCustomThresholds:
         adjusted = detector.adjust_weights(weights, "caution")
         assert adjusted["AAPL"] == pytest.approx(0.15)
         assert adjusted["JPM"] == pytest.approx(0.15)
+
+
+# =====================================================================
+# Tests for audit fixes: H8, H9, M14
+# =====================================================================
+
+
+class TestExtractCloseSeries:
+    """H8: _extract_close_series handles both flat and MultiIndex columns."""
+
+    def test_flat_columns(self):
+        """Standard DataFrame with 'Close' column returns Series."""
+        df = pd.DataFrame({"Close": [100.0, 101.0, 102.0]})
+        result = _extract_close_series(df)
+        assert isinstance(result, pd.Series)
+        assert len(result) == 3
+
+    def test_multiindex_columns(self):
+        """yfinance MultiIndex columns (e.g. ('Close', '^VIX')) are squeezed."""
+        arrays = [["Close", "Open"], ["^VIX", "^VIX"]]
+        tuples = list(zip(*arrays))
+        index = pd.MultiIndex.from_tuples(tuples)
+        df = pd.DataFrame([[100.0, 99.0], [101.0, 100.0]], columns=index)
+        result = _extract_close_series(df)
+        assert isinstance(result, pd.Series)
+        assert len(result) == 2
+
+    def test_single_ticker_multiindex(self):
+        """Single-ticker download returns MultiIndex even for one ticker.
+
+        yfinance >= 0.2.31 returns columns like MultiIndex([('Close', '^VIX'),
+        ('Open', '^VIX')]).  df["Close"] then yields a *DataFrame* (one column
+        named '^VIX'), not a Series.  _extract_close_series must squeeze it.
+        """
+        mi = pd.MultiIndex.from_tuples(
+            [("Close", "^VIX"), ("Open", "^VIX")],
+            names=["Price", "Ticker"],
+        )
+        df = pd.DataFrame(
+            [[25.0, 24.0], [26.0, 25.0], [27.0, 26.0]],
+            columns=mi,
+        )
+        result = _extract_close_series(df)
+        assert isinstance(result, pd.Series)
+        assert float(result.iloc[-1]) == pytest.approx(27.0)
+
+
+class TestHysteresis:
+    """H9: regime de-escalation requires crossing threshold minus hysteresis band."""
+
+    def test_escalation_is_immediate(self):
+        """Escalation from normal→caution uses primary threshold (no delay)."""
+        d = RegimeDetector()
+        assert d.get_regime(vix=31.0, spy_drawdown=0.0) == "caution"
+
+    def test_deescalation_requires_band_crossing(self):
+        """De-escalation from caution→normal requires VIX < caution - hysteresis."""
+        d = RegimeDetector()  # vix_caution=30, vix_hysteresis=2
+        # Escalate to caution
+        d.get_regime(vix=31.0, spy_drawdown=0.0)
+        # VIX drops to 29 — still within hysteresis band (30-2=28), stays caution
+        assert d.get_regime(vix=29.0, spy_drawdown=0.0) == "caution"
+        # VIX drops below 28 — clears hysteresis band, back to normal
+        assert d.get_regime(vix=27.5, spy_drawdown=0.0) == "normal"
+
+    def test_halt_deescalation_requires_band_crossing(self):
+        """De-escalation from halt→caution requires VIX < halt - hysteresis."""
+        d = RegimeDetector()  # vix_halt=40, vix_hysteresis=2
+        # Escalate to halt
+        d.get_regime(vix=41.0, spy_drawdown=0.0)
+        # VIX drops to 39 — still within halt hysteresis band (40-2=38)
+        assert d.get_regime(vix=39.0, spy_drawdown=0.0) == "halt"
+        # VIX drops below 38 — clears halt band, but still above caution (30)
+        assert d.get_regime(vix=35.0, spy_drawdown=0.0) == "caution"
+
+    def test_drawdown_hysteresis(self):
+        """Drawdown de-escalation also uses hysteresis band."""
+        d = RegimeDetector()  # drawdown_caution=0.10, drawdown_hysteresis=0.02
+        # Escalate via drawdown
+        d.get_regime(vix=15.0, spy_drawdown=0.11)
+        # Drawdown improves to 0.09 — within band (0.10 - 0.02 = 0.08)
+        assert d.get_regime(vix=15.0, spy_drawdown=0.09) == "caution"
+        # Drawdown improves below 0.08
+        assert d.get_regime(vix=15.0, spy_drawdown=0.07) == "normal"
+
+    def test_rapid_oscillation_stays_sticky(self):
+        """VIX oscillating around 30 should not cause rapid regime changes."""
+        d = RegimeDetector()
+        regimes = []
+        # Simulate VIX oscillating: 29, 31, 29, 31, 29, 31
+        for vix in [29.0, 31.0, 29.0, 31.0, 29.0, 31.0]:
+            regimes.append(d.get_regime(vix=vix, spy_drawdown=0.0))
+        # After first escalation at VIX=31, should stay caution
+        # (29 > 28=threshold-band, so no de-escalation)
+        assert regimes == ["normal", "caution", "caution", "caution", "caution", "caution"]
+
+    def test_custom_hysteresis_bands(self):
+        """Custom hysteresis values are respected."""
+        d = RegimeDetector(vix_caution=30, vix_hysteresis=5)
+        d.get_regime(vix=31.0, spy_drawdown=0.0)
+        # With 5-point band, need VIX < 25 to de-escalate
+        assert d.get_regime(vix=26.0, spy_drawdown=0.0) == "caution"
+        assert d.get_regime(vix=24.0, spy_drawdown=0.0) == "normal"
+
+
+class TestIsHalt:
+    """M14: is_halt() provides unambiguous halt detection."""
+
+    def test_is_halt_true(self):
+        assert RegimeDetector.is_halt("halt") is True
+
+    def test_is_halt_false_caution(self):
+        assert RegimeDetector.is_halt("caution") is False
+
+    def test_is_halt_false_normal(self):
+        assert RegimeDetector.is_halt("normal") is False

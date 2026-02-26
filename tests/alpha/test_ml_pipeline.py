@@ -295,20 +295,47 @@ class TestOptimizeWeights:
 
 
 class TestGetMlWeightsOrchestration:
+    """H11 update: get_ml_weights now fetches raw OHLCV once and passes it as
+    ``price_data`` to optimize_weights (no double fetch).  It no longer calls
+    fetch_universe; instead it calls fetch_ohlcv + reshape_ohlcv_wide_to_long
+    directly, so mocks must match the new flow."""
+
     @patch("python.alpha.predict.optimize_weights")
     @patch("python.alpha.predict.rank_stocks")
     @patch("python.alpha.predict.compute_features")
-    @patch("python.alpha.predict.fetch_universe")
+    @patch("python.alpha.predict.reshape_ohlcv_wide_to_long")
+    @patch("python.alpha.predict.fetch_ohlcv")
     @patch("python.alpha.predict.train_model")
     @patch("python.data.ingestion.fetch_sp500_tickers")
     def test_full_pipeline_happy_path(
-        self, mock_sp500, mock_train, mock_fetch_u, mock_features, mock_rank, mock_optimize
+        self,
+        mock_sp500,
+        mock_train,
+        mock_fetch_ohlcv,
+        mock_reshape,
+        mock_features,
+        mock_rank,
+        mock_optimize,
     ):
         from python.alpha.predict import get_ml_weights
 
         mock_sp500.return_value = ["AAPL", "MSFT", "GOOG", "AMZN", "META"]
         mock_train.return_value = MagicMock()  # trained model
-        mock_fetch_u.return_value = MagicMock()  # long data
+
+        # Simulate raw OHLCV and long-format with enough rows per ticker
+        raw_ohlcv = MagicMock()
+        mock_fetch_ohlcv.return_value = raw_ohlcv
+
+        dates = pd.bdate_range("2024-01-01", periods=100)
+        rows = []
+        for d in dates:
+            for t in ["AAPL", "MSFT", "GOOG", "AMZN", "META"]:
+                rows.append({"ticker": t, "close": 100.0})
+        long_df = pd.DataFrame(rows, index=np.tile(dates, 5))
+        long_df.index.name = "date"
+        long_df["ticker"] = [t for d in dates for t in ["AAPL", "MSFT", "GOOG", "AMZN", "META"]]
+        mock_reshape.return_value = long_df
+
         mock_features.return_value = MagicMock()  # featured data
         mock_rank.return_value = ["AAPL", "MSFT", "GOOG"]
         mock_optimize.return_value = {"AAPL": 0.4, "MSFT": 0.35, "GOOG": 0.25}
@@ -318,28 +345,48 @@ class TestGetMlWeightsOrchestration:
         assert weights == {"AAPL": 0.4, "MSFT": 0.35, "GOOG": 0.25}
         mock_train.assert_called_once()
         mock_rank.assert_called_once()
+        # H11: optimize_weights now receives price_data (the raw OHLCV)
         mock_optimize.assert_called_once_with(
             ["AAPL", "MSFT", "GOOG"],
             method="hrp",
             current_weights=None,
             turnover_threshold=0.2,
             max_weight=None,
+            price_data=raw_ohlcv,
         )
 
     @patch("python.alpha.predict.rank_stocks")
     @patch("python.alpha.predict.compute_features")
-    @patch("python.alpha.predict.fetch_universe")
+    @patch("python.alpha.predict.reshape_ohlcv_wide_to_long")
+    @patch("python.alpha.predict.fetch_ohlcv")
     @patch("python.alpha.predict.train_model")
     @patch("python.data.ingestion.fetch_sp500_tickers")
     def test_returns_empty_when_no_picks(
-        self, mock_sp500, mock_train, mock_fetch_u, mock_features, mock_rank
+        self,
+        mock_sp500,
+        mock_train,
+        mock_fetch_ohlcv,
+        mock_reshape,
+        mock_features,
+        mock_rank,
     ):
         """When rank_stocks returns empty, get_ml_weights returns empty dict."""
         from python.alpha.predict import get_ml_weights
 
         mock_sp500.return_value = ["AAPL", "MSFT"]
         mock_train.return_value = MagicMock()
-        mock_fetch_u.return_value = MagicMock()
+        mock_fetch_ohlcv.return_value = MagicMock()
+
+        dates = pd.bdate_range("2024-01-01", periods=100)
+        rows = []
+        for d in dates:
+            for t in ["AAPL", "MSFT"]:
+                rows.append({"ticker": t, "close": 100.0})
+        long_df = pd.DataFrame(rows, index=np.tile(dates, 2))
+        long_df.index.name = "date"
+        long_df["ticker"] = [t for d in dates for t in ["AAPL", "MSFT"]]
+        mock_reshape.return_value = long_df
+
         mock_features.return_value = MagicMock()
         mock_rank.return_value = []  # no picks
 

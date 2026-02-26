@@ -11,7 +11,7 @@ Regime thresholds (from improvement plan):
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
@@ -37,12 +37,20 @@ class RegimeDetector:
     Uses VIX level and SPY drawdown from recent highs to classify
     the market into three regimes with corresponding exposure adjustments.
 
+    H9 fix: hysteresis bands prevent rapid regime flipping when VIX or
+    drawdown oscillates around a threshold.  Escalation (normal→caution→halt)
+    uses the primary thresholds; de-escalation requires crossing a lower
+    threshold (primary minus the hysteresis band).
+
     Args:
         vix_caution: VIX threshold for caution regime (default 30).
         vix_halt: VIX threshold for halt regime (default 40).
         drawdown_caution: SPY drawdown threshold for caution (default 0.10).
         drawdown_halt: SPY drawdown threshold for halt (default 0.15).
         caution_multiplier: Exposure multiplier in caution regime (default 0.5).
+        vix_hysteresis: VIX hysteresis band — de-escalation requires VIX
+            to fall this far below the escalation threshold (default 2.0).
+        drawdown_hysteresis: Drawdown hysteresis band (default 0.02 = 2pp).
     """
 
     def __init__(
@@ -52,15 +60,25 @@ class RegimeDetector:
         drawdown_caution: float = 0.10,
         drawdown_halt: float = 0.15,
         caution_multiplier: float = 0.5,
+        vix_hysteresis: float = 2.0,
+        drawdown_hysteresis: float = 0.02,
     ):
         self.vix_caution = vix_caution
         self.vix_halt = vix_halt
         self.drawdown_caution = drawdown_caution
         self.drawdown_halt = drawdown_halt
         self.caution_multiplier = caution_multiplier
+        self.vix_hysteresis = vix_hysteresis
+        self.drawdown_hysteresis = drawdown_hysteresis
+        # H9: track the previous regime for hysteresis logic
+        self._previous_regime: str = "normal"
 
     def get_regime(self, vix: float, spy_drawdown: float) -> str:
-        """Classify current market regime.
+        """Classify current market regime with hysteresis.
+
+        H9 fix: escalation uses the primary thresholds.  De-escalation
+        requires crossing the threshold minus the hysteresis band, preventing
+        rapid flipping when values oscillate around a boundary.
 
         Args:
             vix: Current VIX level.
@@ -71,13 +89,33 @@ class RegimeDetector:
             Regime string: "normal", "caution", or "halt".
         """
         spy_drawdown = abs(spy_drawdown)  # Ensure positive
+        prev = self._previous_regime
 
+        # --- Escalation: uses primary thresholds (immediate) ---
         if vix > self.vix_halt or spy_drawdown > self.drawdown_halt:
-            return "halt"
+            regime = "halt"
         elif vix > self.vix_caution or spy_drawdown > self.drawdown_caution:
-            return "caution"
+            regime = "caution"
         else:
-            return "normal"
+            regime = "normal"
+
+        # --- Hysteresis: sticky de-escalation ---
+        # Only allow de-escalation if we've crossed below threshold - band
+        if prev == "halt" and regime != "halt":
+            # Stay in halt until VIX drops below halt-band AND drawdown below halt-band
+            vix_clear = vix <= (self.vix_halt - self.vix_hysteresis)
+            dd_clear = spy_drawdown <= (self.drawdown_halt - self.drawdown_hysteresis)
+            if not (vix_clear and dd_clear):
+                regime = "halt"
+        elif prev == "caution" and regime == "normal":
+            # Stay in caution until VIX drops below caution-band AND drawdown below caution-band
+            vix_clear = vix <= (self.vix_caution - self.vix_hysteresis)
+            dd_clear = spy_drawdown <= (self.drawdown_caution - self.drawdown_hysteresis)
+            if not (vix_clear and dd_clear):
+                regime = "caution"
+
+        self._previous_regime = regime
+        return regime
 
     def get_regime_state(self, vix: float, spy_drawdown: float) -> RegimeState:
         """Get full regime state with exposure multiplier and message.
@@ -124,6 +162,15 @@ class RegimeDetector:
                 message=f"Normal: VIX={vix:.1f}, SPY drawdown={abs(spy_drawdown):.1%}.",
             )
 
+    @staticmethod
+    def is_halt(regime: str) -> bool:
+        """Check if a regime requires full liquidation.
+
+        M14 fix: callers should use this instead of checking ``weights == {}``
+        to distinguish "halt — close everything" from "no positions to adjust".
+        """
+        return regime == "halt"
+
     def adjust_weights(
         self,
         weights: dict[str, float],
@@ -136,8 +183,10 @@ class RegimeDetector:
             regime: Market regime ("normal", "caution", "halt").
 
         Returns:
-            Adjusted weights. Empty dict for halt, scaled for caution,
-            unchanged for normal.
+            Adjusted weights dict.
+            - halt:    ``{}`` — use ``is_halt(regime)`` to confirm liquidation intent.
+            - caution: weights scaled by ``caution_multiplier``.
+            - normal:  original weights unchanged.
         """
         if regime == "halt":
             logger.warning("Regime HALT: returning empty weights (close all positions)")
@@ -152,6 +201,23 @@ class RegimeDetector:
             return weights
 
 
+def _extract_close_series(df: pd.DataFrame) -> pd.Series:
+    """Safely extract a 1-D Close series from yfinance output.
+
+    H8 fix: recent yfinance versions (>=0.2.31) return a DataFrame with
+    MultiIndex columns even for a single ticker, e.g. ("Close", "^VIX").
+    Indexing with ``["Close"]`` then returns a DataFrame, not a Series,
+    and ``float()`` on a DataFrame raises TypeError.
+
+    This helper handles both the old (flat columns) and new (MultiIndex)
+    formats by squeezing any 2-D result to 1-D.
+    """
+    close = df["Close"]
+    if isinstance(close, pd.DataFrame):
+        close = close.squeeze(axis=1)
+    return close
+
+
 def fetch_vix() -> Optional[float]:
     """Fetch current VIX level from Yahoo Finance.
 
@@ -162,7 +228,8 @@ def fetch_vix() -> Optional[float]:
 
         vix_data = yf.download("^VIX", period="5d", interval="1d", progress=False)
         if vix_data is not None and len(vix_data) > 0:
-            vix = float(vix_data["Close"].iloc[-1])
+            close = _extract_close_series(vix_data)
+            vix = float(close.iloc[-1])
             logger.info(f"Current VIX: {vix:.1f}")
             return vix
     except Exception as e:
@@ -185,7 +252,7 @@ def fetch_spy_drawdown(lookback_days: int = 252) -> Optional[float]:
 
         spy_data = yf.download("SPY", period="1y", interval="1d", progress=False)
         if spy_data is not None and len(spy_data) > 0:
-            close = spy_data["Close"]
+            close = _extract_close_series(spy_data)
             rolling_high = close.rolling(lookback_days, min_periods=1).max()
             current = float(close.iloc[-1])
             high = float(rolling_high.iloc[-1])
