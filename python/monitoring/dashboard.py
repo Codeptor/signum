@@ -16,6 +16,7 @@ JSON API (LLM-friendly):
 - ``GET /api/risk``       — full risk engine summary from backtest
 - ``GET /api/drift``      — latest feature drift report
 - ``GET /api/bot``        — bot state (last trade, shutdown reason, etc.)
+- ``GET /api/logs``       — latest bot log lines (?lines=N, default 80, max 500)
 
 Public API (unchanged):
 - ``create_dashboard(...)``  — standalone backtest-only app
@@ -41,6 +42,9 @@ logger = logging.getLogger(__name__)
 
 RESULTS_DIR = Path("data/processed")
 STATE_FILE = Path("data/bot_state.json")
+BOT_LOG_FILE = Path(os.getenv("LOG_DIR", "/var/log/signum")) / "bot.log"
+# Fallback: check for local log file when not on VPS
+_LOCAL_LOG = Path("live_bot.log")
 
 # ═══════════════════════════════════════════════════════════════════
 # Design Tokens
@@ -1022,6 +1026,35 @@ def _build_live_tab() -> html.Div:
     else:
         children.append(_panel(_empty_state("No trading history yet.")))
 
+    # ── Bot Log ──
+    children.append(html.Div(style={"height": _SP_5}))
+    children.append(_section_label("Bot Log"))
+
+    log_text = _read_log_tail(80)
+    children.append(
+        _panel(
+            html.Pre(
+                log_text,
+                style={
+                    "fontFamily": _FONT_MONO,
+                    "fontSize": "11px",
+                    "lineHeight": "1.6",
+                    "color": _TEXT_SECONDARY,
+                    "backgroundColor": _INSET,
+                    "padding": _SP_4,
+                    "borderRadius": _RADIUS_SM,
+                    "border": f"1px solid {_BORDER}",
+                    "margin": "0",
+                    "maxHeight": "500px",
+                    "overflowY": "auto",
+                    "whiteSpace": "pre-wrap",
+                    "wordBreak": "break-all",
+                },
+            ),
+            padding=_SP_3,
+        )
+    )
+
     return html.Div(children)
 
 
@@ -1340,6 +1373,29 @@ def _load_equity_history() -> pd.Series | None:
     return None
 
 
+def _read_log_tail(n_lines: int = 80) -> str:
+    """Read the last N lines from the bot log file.
+
+    Checks the systemd log path first, then the local log fallback.
+    """
+    for log_path in [BOT_LOG_FILE, _LOCAL_LOG]:
+        if log_path.exists():
+            try:
+                with open(log_path, "rb") as f:
+                    # Seek from end to find last N lines efficiently
+                    f.seek(0, 2)
+                    size = f.tell()
+                    # Read last 64KB max (enough for ~80 lines)
+                    chunk_size = min(size, 65536)
+                    f.seek(max(0, size - chunk_size))
+                    data = f.read().decode("utf-8", errors="replace")
+                    lines = data.splitlines()
+                    return "\n".join(lines[-n_lines:])
+            except Exception as e:
+                logger.warning(f"Could not read log {log_path}: {e}")
+    return "No log file found. Bot may not have started yet."
+
+
 def _fetch_regime_state() -> dict | None:
     """Fetch current market regime (VIX + SPY drawdown)."""
     try:
@@ -1384,6 +1440,7 @@ _API_ENDPOINTS = {
     "/api/risk": "Full risk engine summary (Sharpe, VaR, drawdowns, etc.)",
     "/api/drift": "Latest ML feature drift report (KS stat, PSI per feature)",
     "/api/bot": "Bot state (last trade date, shutdown reason, positions count)",
+    "/api/logs": "Latest bot log lines (default 80, ?lines=N to customize)",
 }
 
 
@@ -1604,6 +1661,22 @@ def register_api_routes(app: dash.Dash) -> None:
                 }
             )
         return _json_response({"timestamp": datetime.now().isoformat(), "bot_state": state})
+
+    # ── GET /api/logs — bot log tail ──
+    @server.route("/api/logs")
+    def api_logs():
+        from flask import request
+
+        n_lines = min(int(request.args.get("lines", 80)), 500)
+        log_text = _read_log_tail(n_lines)
+        lines = log_text.splitlines()
+        return _json_response(
+            {
+                "timestamp": datetime.now().isoformat(),
+                "n_lines": len(lines),
+                "log": lines,
+            }
+        )
 
 
 def _fetch_account_json() -> dict | None:
