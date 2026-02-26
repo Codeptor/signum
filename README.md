@@ -1,304 +1,319 @@
 # Signum
 
 [![CI](https://github.com/Codeptor/signum/actions/workflows/ci.yml/badge.svg)](https://github.com/Codeptor/signum/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-510%20passed-brightgreen)]()
+[![Paper Trading](https://img.shields.io/badge/status-paper%20trading-blue)]()
 
-End-to-end quantitative equity platform: ML alpha generation, portfolio optimization, and a Rust matching engine.
+Automated quantitative equity trading system. Trains a LightGBM model weekly on S&P 500 data, selects top 10 stocks by predicted 5-day return, optimizes portfolio weights via HRP, and executes through Alpaca with ATR-based stop-loss/take-profit brackets.
 
-## Architecture
+Currently paper trading on a DigitalOcean VPS. Collecting data for 3+ months before evaluating for real capital.
 
-```
-ML Signals ──► Black-Litterman Bridge ──► Portfolio Optimizer ──► Risk Engine ──► Risk Manager
-    │                                            │                           │
-    ▼                                            ▼                           ▼
-LightGBM (Alpha158)                    HRP / CVaR / BL              Position Sizing
-TFT (PyTorch)                         Risk Parity                   Real-time Checks
-    │
-    ▼
-Drift Detection (KS + PSI) ──► Dash Dashboard
-```
+## How It Works
 
-**Rust Matching Engine** — Lock-free order book with price-time priority, 4 order types (Limit, Market, IOC, FOK), sub-microsecond latency.
-
-## Live Backtest Results (S&P 500, 5yr history)
-
-Walk-forward backtest on 503 S&P 500 constituents, LightGBM alpha (23 features incl. cross-sectional ranks), residual return target, top-20 portfolio, 5-day rebalancing, 10 bps transaction costs, VIX-based position scaling, liquidity filter:
-
-| Optimizer | Sharpe (net) | Sharpe (gross) | Ann. Return | Max DD | Avg Turnover |
-|-----------|-------------|----------------|-------------|--------|-------------|
-| Equal Weight | **1.66** | 1.78 | 24.6% | 50.0% | 36% |
-| HRP | **1.28** | 1.47 | 13.9% | 40.8% | 39% |
-| Risk Parity | **1.28** | 1.47 | 13.9% | 40.8% | 39% |
-| Black-Litterman | **0.99** | 1.20 | 10.5% | 31.8% | 44% |
-| Min CVaR | **0.99** | 1.20 | 10.5% | 31.8% | 44% |
-
-Alpha improvement loop achieved **+51% net Sharpe** (1.10 → 1.66) through cross-sectional feature engineering, residual return targeting, model regularization, and turnover dampening. Equal-weight top-20 remains the strongest risk-adjusted strategy, consistent with the "1/N puzzle" (DeMiguel et al., 2009). HRP provides the best risk-managed allocation among optimizers.
-
-<details>
-<summary>Improvement breakdown</summary>
-
-| Step | Sharpe | Delta |
-|------|--------|-------|
-| Baseline (absolute features, raw target) | 1.10 | — |
-| + Cross-sectional features + residual target | 1.29 | +17% |
-| + Real OHLCV data, liquidity filter, VIX scaling | 1.44 | +31% |
-| + Feature pruning (remove overfit macro features) | 1.60 | +46% |
-| + Model regularization (min_child_samples=100) | 1.60 | +46% |
-| + Turnover dampening (blend_alpha=0.3) | **1.66** | **+51%** |
-
-Key insight: macro features (VIX, term spread) had the highest tree-split importance but near-zero cross-sectional IC — they were causing overfitting, not adding alpha. Cross-sectional volatility rank (`cs_vol_rank_20d`, IC=0.069) was the strongest new predictor.
-</details>
-
-## Benchmark Results (Criterion.rs)
-
-| Operation | Median Latency |
-|-----------|---------------|
-| Limit order insert | **132 ns** |
-| Market order match (10 levels) | **84 ns** |
-| Market order match (100 levels) | **231 ns** |
-| Market order match (1000 levels) | **1.92 µs** |
-| Cancel order | **71 ns** |
-| Mixed workload (1000 orders) | **249 µs** |
-
-## Project Structure
+Every Wednesday at market open, the bot runs a full cycle:
 
 ```
-quant-platform/
-├── python/
-│   ├── alpha/           # ML signal generation (LightGBM, TFT)
-│   ├── portfolio/       # HRP, CVaR, Black-Litterman, risk engine + attribution
-│   ├── data/            # yfinance ingestion + TimescaleDB storage
-│   ├── backtest/        # Walk-forward CPCV + deflated Sharpe ratio
-│   ├── monitoring/      # Drift detection + Dash dashboard
-│   └── bridge/          # ML predictions → Black-Litterman views
-├── rust/
-│   └── matching-engine/ # Lock-free order book with Criterion benchmarks
-├── infra/
-│   └── docker-compose.yml  # TimescaleDB, Redis, MLflow
-├── tests/               # 415+ tests
-├── dvc.yaml             # Reproducible pipeline DAG
-└── Makefile             # Build orchestration
+Scrape S&P 500 tickers (Wikipedia)
+        │
+        ▼
+Fetch 2yr daily OHLCV (yfinance, 100 random tickers for training)
+        │
+        ▼
+Compute 22 alpha features (momentum, volatility, RSI, volume, cross-sectional ranks, VIX)
+        │
+        ▼
+Train LightGBM (Huber loss, residual return target, 80/20 date-split with 5-day embargo)
+        │
+        ▼
+Score all ~500 S&P 500 stocks using saved winsorization bounds
+        │
+        ▼
+Select top 10 by predicted residual return
+        │
+        ▼
+Optimize weights via HRP (Ledoit-Wolf covariance shrinkage)
+        │
+        ▼
+Risk checks (position size, sector exposure, leverage, VaR, drawdown)
+        │
+        ▼
+Execute via Alpaca (sells first, then buys, poll for fills)
+        │
+        ▼
+Attach OCO brackets (SL = 2x ATR below fill, TP = 3x ATR above fill)
+        │
+        ▼
+Persist state, log to MLflow, sleep until next Wednesday
 ```
 
-## Quick Start
+Between Wednesdays the bot sleeps. GTC stop-loss and take-profit orders sit on Alpaca's servers and fire automatically.
+
+### Regime Detection
+
+The bot monitors VIX and SPY drawdown continuously:
+
+| Regime | Condition | Action |
+|--------|-----------|--------|
+| **Normal** | VIX < 25, SPY DD < 8% | Full exposure |
+| **Caution** | VIX 25-35 or SPY DD 8-15% | 50% exposure (all weights halved) |
+| **Halt** | VIX > 35 and SPY DD > 15% | Liquidate everything, wait 1 hour |
+
+De-escalation uses OR logic (either VIX or drawdown clearing allows caution).
+
+### Model Ensemble
+
+Two-model ensemble with IC-weighted calibration:
+
+- **LightGBM** (60%) — gradient boosting, captures non-linear feature interactions
+- **Random Forest** (40%) — bagging, robust to outliers
+
+Weights are dynamically recalibrated each training cycle using Spearman rank IC on a held-out validation set.
+
+## Deployment
+
+The bot runs on a VPS as two systemd services:
+
+| Service | What | Port |
+|---------|------|------|
+| `signum-bot` | Trading bot (sleeps between Wednesdays) | — |
+| `signum-dashboard` | Dash web UI + JSON API | 8050 (localhost only) |
+
+Both auto-restart on crash and start on boot.
+
+### Quick Deploy
 
 ```bash
-# Setup
-uv venv .venv && source .venv/bin/activate
-uv pip install -e ".[all]"
+# 1. Clone and install
+git clone https://github.com/Codeptor/signum.git
+cd signum
+uv sync
 
-# Infrastructure
-docker-compose -f infra/docker-compose.yml up -d
-
-# Run pipeline
-make ingest    # Fetch S&P 500 data via yfinance
-make train     # Train LightGBM with MLflow tracking
-make backtest  # Walk-forward backtest with CPCV
-make dashboard # Launch Dash risk dashboard on :8050
-
-# Tests
-uv run pytest tests/ -q  # Python (415+ passed)
-cargo test               # Rust (10 passed)
-cargo bench              # Criterion benchmarks
-```
-
-## Paper Trading Setup
-
-```bash
-# 1. Install dependencies
-uv venv .venv && source .venv/bin/activate
-uv pip install -e ".[all]"
-
-# 2. Configure Alpaca credentials
-#    Sign up at https://alpaca.markets (free paper trading account)
-#    Get keys from: https://app.alpaca.markets/paper/dashboard/overview
+# 2. Configure
 cp .env.example .env
 # Edit .env: set ALPACA_API_KEY and ALPACA_API_SECRET
+# Get keys from https://app.alpaca.markets/paper/dashboard/overview
 
-# 3. Dry run (full ML pipeline, no orders submitted)
-source .env && uv run python examples/dry_run.py
+# 3. Dry run (full ML pipeline, no orders)
+uv run python examples/dry_run.py
 
-# 4. Start paper trading bot
-source .env && ./run_live_bot.sh
+# 4. Run locally
+uv run python examples/live_bot.py
 
-# 5. Production deployment (systemd)
-# See deploy/VPS_DEPLOYMENT.md for full guide
+# 5. Or deploy to VPS with systemd
 sudo cp deploy/signum-bot.service /etc/systemd/system/
 sudo systemctl enable --now signum-bot
 ```
 
-The bot rebalances weekly (Wednesdays by default), running the full ML pipeline each cycle:
-scrape S&P 500 tickers, fetch 2yr OHLCV from yfinance, compute 23 alpha features,
-train LightGBM with Huber loss, rank stocks by predicted 5-day return, select top 10,
-optimize weights via HRP, execute orders via Alpaca with ATR-based SL/TP brackets.
+### CLI Shortcuts (zsh)
 
-See `docs/PAPER_TRADING_READINESS.md` for the full readiness assessment and known limitations.
+After setup, these commands are available:
 
+```
+signum            SSH into the VPS
+signum -h         Show all commands
+signum-dash       Open dashboard (SSH tunnel + browser)
+signum-status     Account, regime, bot state
+signum-logs       Stream live bot logs
+signum-positions  Current open positions with P&L
+signum-regime     Market regime (VIX, SPY drawdown)
+signum-restart    Restart the bot service
+signum-stop       Stop the bot service
+signum-deploy     Push local code to VPS and restart
+```
 
-## Key Components
+## Monitoring
 
-### ML Alpha Generation
-- **LightGBM/CatBoost** cross-sectional model with 23 features (Alpha158 technicals + cross-sectional ranks)
-- **Cross-sectional features**: percentile ranks for momentum, volatility, and volume within each date
-- **Residual return target**: model predicts stock-specific alpha (market-neutral), not absolute returns
-- **Temporal Fusion Transformer** wrapper (requires `pip install 'quant-platform[ml]'`)
-- MLflow experiment tracking with IC, Rank IC metrics
+### Dashboard (port 8050)
 
-### Portfolio Optimization (skfolio)
-- **Hierarchical Risk Parity (HRP)** — avoids covariance inversion
-- **Minimum CVaR** — tail risk minimization via linear program
-- **Black-Litterman with ML views** — ML confidence scores mapped to view uncertainties
+Access via SSH tunnel: `ssh -L 8050:localhost:8050 user@vps-ip`
 
-### Risk Engine
-- **VaR**: Parametric, Historical, and Cornish-Fisher (accounts for skewness & kurtosis)
-- **CVaR / Expected Shortfall**: Historical simulation
-- **Drawdown Analysis**: Max, average, duration statistics
-- **Risk-Adjusted Returns**: Sharpe, Sortino, Calmar, and Omega ratios
-- **Rolling Metrics**: 63-day rolling Sharpe, VaR, max drawdown, beta
-- **Volatility Regime Detection**: Low/normal/high classification
-- **Information Ratio**: Alpha per unit tracking error vs benchmark
-- **Herfindahl-Hirschman concentration index**
+Two tabs:
+- **Live** — account overview, open positions, regime beacon, equity curve, bot log viewer
+- **Backtest** — historical performance, drawdown, rolling Sharpe
 
-### Risk Attribution
-- **Marginal Risk Contribution (MRC)**: Risk added per unit weight
-- **Component Risk**: Actual contribution to portfolio volatility
-- **Risk Parity Optimization**: True equal risk contribution
-- **Diversification Ratio**: Weighted avg vol / portfolio vol
-- **Stress Correlation**: Correlation breakdown during drawdowns
+### JSON API
 
-### Stress Testing
-- **Historical Scenarios**: 2008 crisis, 2020 COVID, 2022 hikes, dot-com bust, flash crash
-- **Hypothetical Shocks**: "What if Tech drops 20%?" scenario analysis
-- **Monte Carlo Stress**: Elevated volatility simulations (1.5x, 2.5x, 3x)
-- **Correlation Breakdown**: How correlations spike during stress periods
+11 endpoints, all return structured JSON with CORS headers:
 
-### Risk Manager
-- **Real-time Risk Checks**: Position size limits, daily trade limits
-- **Risk/Reward Validation**: Minimum 2:1 ratio enforcement
-- **Portfolio Monitoring**: VaR, drawdown, Sharpe checks
-- **Position Sizing**: Kelly criterion, risk-based, volatility-adjusted sizing
+| Endpoint | Returns |
+|----------|---------|
+| `GET /api` | Index of all endpoints |
+| `GET /api/status` | System overview (regime + account + bot state) |
+| `GET /api/account` | Alpaca account (equity, cash, buying power) |
+| `GET /api/positions` | Open positions with unrealized P&L |
+| `GET /api/regime` | VIX, SPY drawdown, exposure multiplier |
+| `GET /api/equity` | Equity history time-series |
+| `GET /api/risk` | Full risk engine output (VaR, Sharpe, drawdowns) |
+| `GET /api/drift` | Feature drift report (PSI per feature) |
+| `GET /api/bot` | Bot state (last trade, shutdown reason) |
+| `GET /api/backtest` | Backtest metrics and risk summary |
+| `GET /api/logs` | Bot log lines (`?lines=N`, default 80, max 500) |
 
-### Execution Bridge
-- **Order Validation**: Risk manager checks before execution
-- **Position Tracking**: Real-time position and P&L monitoring
-- **Paper Trading**: Simulate live trading without real capital
-- **Portfolio Rebalancing**: Automated target weight reconciliation
-- **Equity Curve**: Track performance over time
-- **Position Sizing**: Kelly criterion, risk-based, volatility-adjusted sizing
+### Alerts
 
-### Rust Matching Engine
-- `BTreeMap<Price, VecDeque<Order>>` for bid/ask levels
-- Price-time priority matching (LMAX Disruptor pattern)
-- Order types: Limit, Market, IOC, FOK
-- All operations sub-microsecond at typical book depths
+Set `ALERT_WEBHOOK_URL` in `.env` to a Slack/Discord webhook for:
+- Drawdown kill switch triggered (>15%)
+- Regime halt/caution transitions
+- ML pipeline failures
+- Feature drift detected
 
-### Backtesting
-- Walk-forward cross-validation with embargo period
-- Deflated Sharpe Ratio (Bailey & Lopez de Prado, 2014)
-- Transaction cost model (turnover-based, configurable bps)
-- Position limits (max weight constraint)
-- Turnover dampening (weight blending, optimized blend_alpha=0.3)
-- VIX-based position scaling (reduce exposure in high-volatility regimes)
-- Liquidity filter (exclude bottom 20% by dollar volume)
-- Multi-strategy comparison
+## Risk Controls
 
-### Live Trading
-- **Alpaca Integration**: Paper and live trading via Alpaca Markets API
-- **Broker Abstraction**: Generic broker interface for multiple providers
-- **Position Synchronization**: Sync local state with broker positions
-- **Real-time Monitoring**: Live P&L and risk tracking
-- **Paper Trading**: Risk-free testing environment
+### Trade-Level
 
-### Monitoring
-- Feature drift detection (KS test + Population Stability Index)
-- Dash dashboard: KPI cards, cumulative returns, drawdown, rolling Sharpe, turnover, concentration gauge
+| Check | Limit | Severity |
+|-------|-------|----------|
+| Max position weight | 30% | Critical (blocks trade) |
+| Max sector weight | 25% | Critical |
+| Max single trade size | 15% | Critical |
+| Max leverage | 1.0x (long-only) | Critical |
+| Max daily trades | 50 | Warning |
+| Max daily turnover | 100% | Warning |
+
+### Portfolio-Level
+
+| Check | Limit | Action |
+|-------|-------|--------|
+| Max drawdown | 15% | Kill switch — liquidate all |
+| VaR (95%, daily) | 6% | Warning logged |
+| Min Sharpe ratio | -0.5 | Warning logged |
+| Max volatility | 30% annualized | Warning logged |
+
+### Position Protection
+
+- ATR-based stop-loss (2x ATR) and take-profit (3x ATR) via OCO orders
+- Fallback to fixed 5% SL / 15% TP when ATR unavailable
+- Orphaned order cleanup every cycle
+- Duplicate execution prevention (checks `_has_traded_today` before trading)
+
+## Project Structure
+
+```
+signum/
+├── examples/
+│   ├── live_bot.py              # Main trading bot (entry point)
+│   ├── dry_run.py               # ML pipeline test without orders
+│   └── paper_trading_tracker.py # CLI portfolio snapshot
+├── python/
+│   ├── alpha/
+│   │   ├── features.py          # 22 alpha features + winsorization
+│   │   ├── model.py             # LightGBM/CatBoost wrapper
+│   │   ├── ensemble.py          # LightGBM + RF ensemble with IC calibration
+│   │   ├── predict.py           # End-to-end: data → features → rank → optimize
+│   │   └── train.py             # Training pipeline orchestrator
+│   ├── portfolio/
+│   │   ├── optimizer.py         # HRP, Min-CVaR, Black-Litterman, Risk Parity
+│   │   ├── risk.py              # VaR, CVaR, Sharpe, Sortino, drawdowns
+│   │   ├── risk_manager.py      # Real-time trade gating
+│   │   └── risk_attribution.py  # Marginal/component risk, Brinson-Fachler
+│   ├── bridge/
+│   │   └── execution.py         # Order submission, position tracking, P&L
+│   ├── brokers/
+│   │   ├── base.py              # Abstract broker interface
+│   │   └── alpaca_broker.py     # Alpaca Markets implementation
+│   ├── data/
+│   │   ├── ingestion.py         # S&P 500 scrape + yfinance OHLCV
+│   │   └── sectors.py           # GICS sector map + dynamic yfinance lookup
+│   ├── backtest/
+│   │   ├── run.py               # Walk-forward backtest engine
+│   │   ├── validation.py        # Purged k-fold CV + deflated Sharpe
+│   │   ├── robustness.py        # Monte Carlo, block bootstrap, stress tests
+│   │   └── regime_analysis.py   # Per-regime performance breakdown
+│   └── monitoring/
+│       ├── dashboard.py         # Dash web UI + JSON API (11 endpoints)
+│       ├── drift.py             # KS test + PSI feature drift detection
+│       └── regime.py            # VIX/SPY-based regime detector
+├── deploy/
+│   └── signum-bot.service       # systemd service file
+├── tests/                       # 510 tests
+├── rust/matching-engine/        # Lock-free order book (sub-microsecond)
+├── run_live_bot.sh              # Bash wrapper with crash recovery
+├── .env.example                 # Environment variable template
+└── pyproject.toml               # Python 3.11, all dependencies
+```
+
+## Configuration
+
+All parameters configurable via `.env`:
+
+```bash
+# Alpaca (required)
+ALPACA_API_KEY=your_key
+ALPACA_API_SECRET=your_secret
+
+# Strategy
+TOP_N_STOCKS=10              # Stocks to hold
+OPTIMIZER_METHOD=hrp         # hrp, min_cvar, risk_parity
+REBALANCE_FREQUENCY=weekly   # daily or weekly
+REBALANCE_DAY=2              # 0=Mon ... 4=Fri
+
+# Risk
+MAX_POSITION_WEIGHT=0.30     # 30% max per position
+MAX_DRAWDOWN_LIMIT=0.15      # 15% kill switch
+ATR_SL_MULTIPLIER=2.0        # Stop-loss at 2x ATR
+ATR_TP_MULTIPLIER=3.0        # Take-profit at 3x ATR
+
+# Alerts (optional)
+ALERT_WEBHOOK_URL=           # Slack/Discord webhook
+```
+
+## Backtest Results
+
+Walk-forward backtest on S&P 500, LightGBM alpha (22 features), residual return target, top-20 portfolio, 5-day rebalancing, VIX scaling:
+
+| Optimizer | Sharpe (net) | Ann. Return | Max DD | Avg Turnover |
+|-----------|-------------|-------------|--------|-------------|
+| Equal Weight | 1.66 | 24.6% | 50.0% | 36% |
+| HRP | 1.28 | 13.9% | 40.8% | 39% |
+| Black-Litterman | 0.99 | 10.5% | 31.8% | 44% |
+
+**Known backtest limitations** (these don't affect live trading):
+- Survivorship bias: uses current S&P 500 list for historical data (~1-3% annual return inflation)
+- Forward return overlap: 5-day returns with 5-day rebalancing inflates Sharpe by ~sqrt(overlap)
+- Feature leakage: backtest computes features on full dataset before train/test split (live pipeline correctly saves/loads bounds per training cycle)
+
+## Audit History
+
+Three rounds of code audit (113+ findings resolved):
+
+| Round | Findings | Focus |
+|-------|----------|-------|
+| 1 | 40 | Initial code review |
+| 2 | 56 | Parallel audit by 6 agents across execution + ML pipeline |
+| 3 | 37 | Final pre-paper-trading hardening |
+
+Key fixes: OCO order construction, train/inference winsorization parity, date-space purged k-fold, geometric Sharpe standardization, Ledoit-Wolf covariance shrinkage, regime de-escalation logic, risk manager weight tracking, dynamic sector classification.
+
+## Tests
+
+```bash
+uv run python -m pytest tests/ -x -q --tb=short
+# 510 passed in ~80s
+```
+
+Coverage includes: ML pipeline (features, model, ensemble, predict), portfolio optimization, risk engine, risk manager, execution bridge, broker integration, backtest validation, robustness analysis, live bot helpers, and full integration tests.
 
 ## Tech Stack
 
 | Layer | Technology |
 |-------|-----------|
-| ML | LightGBM, CatBoost, PyTorch Forecasting (TFT) |
-| Portfolio | skfolio, cvxpy |
-| Data | yfinance, SQLAlchemy, TimescaleDB, Parquet |
+| ML | LightGBM, scikit-learn (Random Forest) |
+| Portfolio | skfolio (HRP, CVaR, BL), Ledoit-Wolf shrinkage |
+| Data | yfinance, pandas |
 | Risk | scipy, numpy |
-| Monitoring | Evidently-style drift (scipy), Dash + Plotly |
-| Execution | Rust, Criterion.rs |
-| Brokers | Alpaca Markets API |
-| MLOps | MLflow, DVC |
-| Infra | Docker Compose (TimescaleDB, Redis, MLflow) |
+| Monitoring | Dash, Plotly, Flask (JSON API) |
+| Broker | Alpaca Markets API (`alpaca-trade-api`) |
+| MLOps | MLflow |
+| Matching Engine | Rust, BTreeMap, Criterion.rs |
 
----
+## Design Decisions
 
-## Recent Improvements (February 2026)
+**Residual return target**: The model predicts stock-specific alpha (returns minus cross-sectional mean), not absolute returns. This means the model learns which stocks outperform relative to the average — works well in bull/flat markets, but in broad selloffs all positions lose money (regime detection partially mitigates this).
 
-### Enhanced Risk Analytics
-- **15 new risk metrics** including Sortino, Calmar, Omega, Information Ratio
-- **Cornish-Fisher VaR** for fat-tailed distributions
-- **Rolling risk metrics** (63-day windows) for dynamic monitoring
-- **Volatility regime detection** for adaptive strategies
+**Weekly rebalancing**: Reduces transaction costs ~74% vs daily. The model predicts 5-day forward returns, matching the rebalance frequency.
 
-### Risk Attribution System
-- **Marginal Risk Contribution** analysis
-- **Component risk breakdown** per asset
-- **True Risk Parity** optimization (vs HRP)
-- **Diversification ratio** tracking
-- **Stress correlation** analysis
+**HRP over mean-variance**: HRP uses hierarchical clustering + recursive bisection — no covariance matrix inversion required. More stable with 10 stocks and noisy correlation estimates.
 
-### Advanced Stress Testing
-- **Historical scenarios**: 2008 crisis, COVID crash, rate hikes
-- **Hypothetical shocks**: Custom scenario modeling
-- **Monte Carlo stress** with elevated volatility
-- **Correlation breakdown** during stress periods
+**Long-only with market-neutral model**: The model is trained on residual returns but the bot only takes long positions. This wastes half the model's discriminative power by design. A long-short structure would capture more alpha but adds complexity (margin, locate fees, short squeeze risk) that isn't warranted during paper trading validation.
 
-### Risk Manager Integration
-- **Real-time risk checks** in backtest loop
-- **Position sizing** with Kelly criterion
-- **Risk/Reward validation** (2:1 minimum)
-- **Automated stop-losses** and limits
-
-### Performance Attribution
-- **Brinson-Fachler model**: Allocation, selection, and interaction effects
-- **Sector-level decomposition**: Track where alpha comes from
-- **Attribution reports**: Formatted analysis of performance drivers
-
-### Execution Bridge
-- **Order management**: Submit and track orders with risk validation
-- **Position tracking**: Real-time P&L monitoring
-- **Paper trading**: Full simulation without real capital
-- **Portfolio reconciliation**: Automated rebalancing to target weights
-
-### Live Trading
-- **Alpaca Integration**: Paper and live trading support
-- **Broker Abstraction**: Generic interface for multiple brokers
-- **Position Sync**: Automatic reconciliation with broker
-- **Real-time Data**: Live market data and execution
-
-### Audit Round 2 (February 2026)
-
-Two parallel audits (6 agents) identified 56 additional findings across execution and ML pipeline layers. All resolved:
-
-**Execution layer** (28 fixes):
-- OCO order construction, partial fill reconciliation, timeout handling
-- Risk manager severity levels, weight initialization, sector exposure
-- Liquidation safety, renorm-clamp stability, caution mode scaling
-- Timezone consistency (NY for rebalance, UTC for order IDs)
-- Batch price fetch, stale position close bypass, atomic state write
-
-**ML pipeline** (28 fixes):
-- Train/inference winsorization bounds consistency
-- Target winsorization removed (Huber loss handles outliers)
-- Date-space purged k-fold with calendar-day purge gap
-- Spearman rank IC (not Pearson) for cross-sectional signals
-- Geometric Sharpe with risk-free rate subtraction (centralized)
-- Net-exposure gate (reduces longs when median prediction < 0)
-- Ledoit-Wolf covariance shrinkage for HRP
-- Stale VIX detection and OR-based halt de-escalation
-- Stationary block bootstrap (preserves autocorrelation)
-
-### Test Coverage
-- **415+ tests** (up from 20 at project start)
-- Integration tests for full pipeline (data -> signal -> portfolio -> risk)
-- Live trading path tests (MockBroker -> ExecutionBridge -> trading cycle)
-- ML orchestration tests (fetch -> features -> rank -> optimize)
-- 8 audit-specific test coverage gaps filled (short positions, OCO top-up, atomic write, liquidation failure, has-traded-today, position flip, no-price skip, renorm-clamp)
-
-**Next Steps**: Merge audit branches to `main`, begin paper trading, migrate from deprecated `alpaca-trade-api` to `alpaca-py`, add drift detection to live loop, implement point-in-time index membership for production backtests.
+**ATR-based brackets over fixed percentages**: 2x ATR stop-loss adapts to each stock's volatility. A volatile stock gets a wider stop, a stable stock gets a tighter one. Falls back to fixed 5%/15% when ATR data is unavailable.
