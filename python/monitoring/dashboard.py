@@ -1781,4 +1781,7 @@ if __name__ == "__main__":
         rolling = returns.rolling(60).mean() / returns.rolling(60).std() * np.sqrt(252)
         app = create_dashboard(returns, weights, risk, rolling)
 
-    app.run(debug=True, port=8050)
+    import os
+
+    debug_mode = os.environ.get("DASH_DEBUG", "false").lower() == "true"
+    app.run(debug=debug_mode, host="127.0.0.1", port=8050)

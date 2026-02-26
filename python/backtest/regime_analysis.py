@@ -18,6 +18,9 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from python.backtest.robustness import compute_sharpe
+from python.data.config import RISK_FREE_RATE
+
 logger = logging.getLogger(__name__)
 
 
@@ -104,7 +107,7 @@ def compute_regime_metrics(
     regime: str,
     start_date: str,
     end_date: str,
-    risk_free_rate: float = 0.05,
+    risk_free_rate: float = RISK_FREE_RATE,
 ) -> RegimeResult:
     """Compute performance metrics for a returns series within a regime.
 
@@ -140,13 +143,14 @@ def compute_regime_metrics(
     annual_return = float((1 + total_return) ** (1 / max(years, 0.01)) - 1) if years > 0 else 0.0
 
     vol = float(returns.std() * np.sqrt(trading_days))
-    daily_rf = risk_free_rate / trading_days
-    excess = returns - daily_rf
-    # M-REGIME-SHARPE fix: denominator must be excess.std(), not returns.std().
-    # Using returns.std() ignores the variance of the risk-free subtraction
-    # (minor for constant rf, but inconsistent with standard Sharpe definition).
-    excess_std = excess.std()
-    sharpe = float(excess.mean() / excess_std * np.sqrt(trading_days)) if excess_std > 0 else 0.0
+    # Use centralized geometric Sharpe (M-SHARPE3) for consistency with
+    # run.py and robustness.py.  The previous arithmetic formula here
+    # produced non-comparable values.
+    sharpe = compute_sharpe(
+        returns,
+        periods_per_year=trading_days,
+        risk_free_rate=risk_free_rate,
+    )
 
     # Max drawdown
     cumulative = (1 + returns).cumprod()
@@ -170,7 +174,7 @@ def compute_regime_metrics(
 def backtest_by_regime(
     strategy_returns: pd.Series,
     regimes: Optional[dict[str, tuple[str, str]]] = None,
-    risk_free_rate: float = 0.05,
+    risk_free_rate: float = RISK_FREE_RATE,
 ) -> RegimeAnalysis:
     """Evaluate strategy returns across market regimes.
 

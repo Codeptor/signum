@@ -460,10 +460,12 @@ def _append_equity_history(equity: float) -> None:
 
 
 def _has_traded_today(broker: AlpacaBroker) -> bool:
-    """Check if the bot has already submitted orders today.
+    """Check if the bot has already submitted *entry* orders today.
 
-    Prevents duplicate execution on restart by checking for recent orders
-    from the current trading session.
+    Prevents duplicate execution on restart by checking for recent buy-side
+    orders from the current trading session.  GTC sell-side orders (SL/TP
+    brackets from previous cycles) are excluded — otherwise a bracket fill
+    on a rebalance morning would cause the bot to skip the weekly rebalance.
 
     C2 fix: created_at may be a datetime or string — normalize to string.
     M1 fix: use UTC date to match Alpaca's UTC timestamps.
@@ -478,12 +480,19 @@ def _has_traded_today(broker: AlpacaBroker) -> bool:
         after_ts = f"{today_utc}T00:00:00Z"
         orders = broker.list_orders(status="all", after=after_ts)
 
-        executed_today = [
-            o for o in orders if o.status not in ("canceled", "cancelled", "expired") and o.order_id
+        # Only count buy-side orders as "traded today".  Sell-side orders
+        # include GTC SL/TP bracket fills from previous weeks that should
+        # not prevent the current cycle's rebalance.
+        entry_orders = [
+            o
+            for o in orders
+            if o.status not in ("canceled", "cancelled", "expired")
+            and o.order_id
+            and getattr(o, "side", "") == "buy"
         ]
 
-        if executed_today:
-            logger.info(f"Found {len(executed_today)} orders executed today.")
+        if entry_orders:
+            logger.info(f"Found {len(entry_orders)} buy-side orders executed today.")
             return True
 
         return False
@@ -856,7 +865,19 @@ def run_trading_cycle(
                     sl_tp_qty = actual_qty
 
                 # Try ATR-based stops first, fall back to fixed %
-                atr = get_current_atr(entry["symbol"])
+                # Use pre-fetched OHLCV from ML pipeline to avoid 10 extra
+                # yfinance calls per rebalance cycle.
+                _ohlcv_cache = _predict_mod._last_raw_ohlcv
+                _sym_ohlcv = None
+                if _ohlcv_cache is not None:
+                    try:
+                        if isinstance(_ohlcv_cache.columns, pd.MultiIndex):
+                            _sym_ohlcv = _ohlcv_cache.xs(entry["symbol"], axis=1, level=0)
+                        elif entry["symbol"] in _ohlcv_cache.columns:
+                            _sym_ohlcv = _ohlcv_cache[[entry["symbol"]]]
+                    except (KeyError, TypeError):
+                        pass
+                atr = get_current_atr(entry["symbol"], ohlcv_data=_sym_ohlcv)
                 if atr is not None and atr > 0:
                     sl_price = round(fill_price - (ATR_SL_MULTIPLIER * atr), 2)
                     tp_price = round(fill_price + (ATR_TP_MULTIPLIER * atr), 2)

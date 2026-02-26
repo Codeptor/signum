@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
+from python.data.config import RISK_FREE_RATE
 from python.portfolio.risk import RiskEngine
 
 
@@ -62,7 +63,7 @@ class RiskManager:
     def __init__(
         self,
         limits: Optional[RiskLimits] = None,
-        risk_free_rate: float = 0.02,
+        risk_free_rate: float = RISK_FREE_RATE,
         sector_map: Optional[Dict[str, str]] = None,
     ):
         """

@@ -1,5 +1,10 @@
 """Model ensemble for robust cross-sectional return predictions.
 
+**Status: Research-only.**  This module is NOT wired into the live pipeline.
+``predict.py`` and ``train.py`` use ``CrossSectionalModel`` (single LightGBM)
+directly.  The ensemble is available for offline experiments but requires
+explicit integration to use in production.
+
 Combines LightGBM and Random Forest with IC-weighted averaging
 to reduce variance and overfitting (Phase 3, §2.3.3).
 

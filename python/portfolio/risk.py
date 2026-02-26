@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+from python.data.config import RISK_FREE_RATE
+
 
 class RiskEngine:
     """Portfolio risk calculation engine with comprehensive metrics."""
@@ -14,14 +16,14 @@ class RiskEngine:
         self,
         returns: pd.DataFrame,
         weights: pd.Series,
-        rf_rate: float = 0.05,
+        rf_rate: float = RISK_FREE_RATE,
         benchmark_returns: Optional[pd.Series] = None,
     ):
         """
         Args:
             returns: DataFrame with asset returns (columns = assets)
             weights: Portfolio weights
-            rf_rate: Annual risk-free rate (default: 2%)
+            rf_rate: Annual risk-free rate (default: 5%, from config.RISK_FREE_RATE)
             benchmark_returns: Optional benchmark returns for Information Ratio
         """
         self.returns = returns

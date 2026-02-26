@@ -471,10 +471,16 @@ def get_current_atr(
     window: int = 14,
     period: str = "3mo",
     default: float | None = None,
+    ohlcv_data: pd.DataFrame | None = None,
 ) -> float | None:
-    """Fetch current ATR for a single symbol from Yahoo Finance.
+    """Get current ATR for a single symbol.
 
     Convenience function for the live bot to get ATR for stop-loss placement.
+
+    If ``ohlcv_data`` is provided (a DataFrame with High, Low, Close columns
+    for the given symbol), it is used directly — avoiding a redundant
+    ``yf.download()`` call.  Otherwise falls back to fetching from Yahoo
+    Finance.
 
     M-ATR fix: added ``default`` parameter and NaN guard.  When the ATR
     computation fails or returns NaN, the function returns ``default``
@@ -484,8 +490,11 @@ def get_current_atr(
     Args:
         symbol: Ticker symbol.
         window: ATR lookback period.
-        period: Yahoo Finance period string for data fetch.
+        period: Yahoo Finance period string for data fetch (ignored if
+            ``ohlcv_data`` is provided).
         default: Value to return if ATR cannot be computed.
+        ohlcv_data: Optional pre-fetched OHLCV DataFrame for this symbol.
+            Must contain High, Low, and Close columns.
 
     Returns:
         Current ATR value, or ``default`` if data unavailable or NaN.
@@ -495,9 +504,13 @@ def get_current_atr(
     logger = logging.getLogger(__name__)
 
     try:
-        import yfinance as yf
+        if ohlcv_data is not None and len(ohlcv_data) >= window + 1:
+            data = ohlcv_data
+        else:
+            import yfinance as yf
 
-        data = yf.download(symbol, period=period, interval="1d", progress=False)
+            data = yf.download(symbol, period=period, interval="1d", progress=False)
+
         if data is None or len(data) < window + 1:
             logger.warning(f"Insufficient data for ATR computation: {symbol}")
             return default

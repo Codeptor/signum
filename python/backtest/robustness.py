@@ -8,6 +8,8 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 
+from python.data.config import RISK_FREE_RATE
+
 logger = logging.getLogger(__name__)
 
 RESULTS_DIR = Path("data/processed")
@@ -28,7 +30,7 @@ HISTORICAL_SCENARIOS = {
 def compute_sharpe(
     returns: pd.Series | np.ndarray,
     periods_per_year: float = 252 / 5,
-    risk_free_rate: float = 0.05,
+    risk_free_rate: float = RISK_FREE_RATE,
 ) -> float:
     """Centralized Sharpe ratio calculation (geometric annualization, rf-adjusted).
 
@@ -56,7 +58,7 @@ def compute_sharpe(
 def compute_metrics(
     returns: pd.Series,
     periods_per_year: float = 252 / 5,
-    risk_free_rate: float = 0.05,
+    risk_free_rate: float = RISK_FREE_RATE,
 ) -> dict:
     """Compute basic performance metrics for a return series.
 

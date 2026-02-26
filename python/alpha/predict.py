@@ -66,6 +66,9 @@ MAX_MODEL_VERSIONS = 10
 
 # R3-P-8 fix: module-level storage for last drift report (replaces function attribute)
 _last_drift_report: dict | None = None
+# Module-level reference to the raw OHLCV fetched during the ML pipeline.
+# The live bot can access this to compute ATR without refetching.
+_last_raw_ohlcv: pd.DataFrame | None = None
 
 
 def _load_cached_model() -> CrossSectionalModel | None:
@@ -381,6 +384,21 @@ def train_model(
         logger.info(f"Loading training data from {cached}")
         raw = pd.read_parquet(cached)
         long = reshape_ohlcv_wide_to_long(raw)
+        # Trim to TRAINING_LOOKBACK to ensure deterministic training window
+        # regardless of cache source.  The DVC pipeline fetches 5y, but we
+        # only want the most recent 2y for training (H-SURV survivorship fix).
+        cutoff = pd.Timestamp.now() - pd.DateOffset(years=2)
+        if hasattr(long.index, "get_level_values"):
+            dates = long.index.get_level_values(0)
+        else:
+            dates = long.index
+        pre_trim = len(long)
+        long = long[dates >= cutoff]
+        if len(long) < pre_trim:
+            logger.info(
+                f"Trimmed training data to {TRAINING_LOOKBACK} lookback: "
+                f"{pre_trim} -> {len(long)} rows"
+            )
     else:
         logger.info("No cached data found, fetching S&P 500 history for training...")
         from python.data.ingestion import fetch_sp500_tickers
@@ -757,6 +775,10 @@ def get_ml_weights(
     # Previously, fetch_universe fetched data for ranking, then optimize_weights
     # fetched again independently — the two HTTP calls could return different data.
     raw_ohlcv = fetch_ohlcv(universe, period=MIN_HISTORY_DAYS)
+    # Store for downstream use (e.g. ATR computation in live_bot) to avoid
+    # redundant yfinance calls.
+    global _last_raw_ohlcv
+    _last_raw_ohlcv = raw_ohlcv
     universe_data = reshape_ohlcv_wide_to_long(raw_ohlcv)
     # Apply minimum-history filter
     counts = universe_data.groupby("ticker").size()

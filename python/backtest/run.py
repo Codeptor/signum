@@ -18,6 +18,7 @@ from python.alpha.model import CrossSectionalModel
 from python.alpha.train import FEATURE_COLS
 from python.backtest.validation import deflated_sharpe_ratio, walk_forward_split
 from python.bridge.bl_views import create_bl_views
+from python.data.config import RISK_FREE_RATE
 from python.data.ingestion import extract_close_prices, reshape_ohlcv_wide_to_long
 from python.portfolio.optimizer import PortfolioOptimizer
 
@@ -28,9 +29,7 @@ RESULTS_DIR = Path("data/processed")
 # Minimum trailing days needed for covariance estimation
 MIN_PRICE_HISTORY = 60
 
-# C-SHARPE fix: risk-free rate for Sharpe ratio calculation.
-# Approximate 1-year US Treasury bill rate as of 2025.
-RISK_FREE_RATE = 0.05
+# Risk-free rate imported from python.data.config.RISK_FREE_RATE
 
 
 def _allocate(
@@ -155,7 +154,7 @@ def run_backtest(
     optimizer_method: str | dict = "black_litterman",
     transaction_cost_bps: float = 15.0,  # 15 bps (realistic, up from 10)
     max_weight: float = 0.15,
-    blend_alpha: float = 0.5,
+    blend_alpha: float = 0.5,  # NOTE: live bot uses 1.0 (no blending) — see #23
     macro_path: str = "data/raw/macro_indicators.parquet",
     liquidity_filter_pct: float = 0.2,
     vix_scaling: bool = True,

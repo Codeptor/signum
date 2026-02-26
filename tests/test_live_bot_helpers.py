@@ -847,7 +847,7 @@ class TestHasTradedToday:
     """
 
     def test_string_created_at_today(self):
-        """Orders with string created_at matching today should count."""
+        """Buy-side orders with string created_at matching today should count."""
         from examples.live_bot import _has_traded_today
 
         mock_broker = MagicMock()
@@ -856,13 +856,14 @@ class TestHasTradedToday:
         order = MagicMock()
         order.status = "filled"
         order.order_id = "ord-1"
+        order.side = "buy"
         order.created_at = f"{today_str}T14:30:00Z"  # String format
         mock_broker.list_orders.return_value = [order]
 
         assert _has_traded_today(mock_broker) is True
 
     def test_datetime_created_at_today(self):
-        """Orders with datetime created_at matching today should count (C2 fix)."""
+        """Buy-side orders with datetime created_at should count (C2 fix)."""
         from examples.live_bot import _has_traded_today
 
         mock_broker = MagicMock()
@@ -870,10 +871,31 @@ class TestHasTradedToday:
         order = MagicMock()
         order.status = "filled"
         order.order_id = "ord-2"
+        order.side = "buy"
         order.created_at = datetime.now(timezone.utc)  # datetime object
         mock_broker.list_orders.return_value = [order]
 
         assert _has_traded_today(mock_broker) is True
+
+    def test_sell_side_gtc_not_counted(self):
+        """Sell-side GTC orders (SL/TP brackets) should NOT count as traded today.
+
+        Fixes #19: a GTC bracket fill from a previous cycle should not prevent
+        the weekly rebalance from executing.
+        """
+        from examples.live_bot import _has_traded_today
+
+        mock_broker = MagicMock()
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        order = MagicMock()
+        order.status = "filled"
+        order.order_id = "ord-gtc-1"
+        order.side = "sell"
+        order.created_at = f"{today_str}T09:31:00Z"
+        mock_broker.list_orders.return_value = [order]
+
+        assert _has_traded_today(mock_broker) is False
 
     def test_yesterday_orders_not_counted(self):
         """Orders from yesterday should not count as traded today.
@@ -900,6 +922,7 @@ class TestHasTradedToday:
         order = MagicMock()
         order.status = "canceled"
         order.order_id = "ord-4"
+        order.side = "buy"
         order.created_at = f"{today_str}T14:30:00Z"
         mock_broker.list_orders.return_value = [order]
 
