@@ -24,11 +24,14 @@ import json
 from pathlib import Path
 
 from python.alpha.predict import get_ml_weights
+from python.alpha.features import get_current_atr
 from python.bridge.execution import ExecutionBridge
 from python.brokers.alpaca_broker import AlpacaBroker
 from python.brokers.base import BrokerOrder
 from python.monitoring.drift import DriftDetector
 from python.portfolio.risk_manager import RiskLimits, RiskManager
+from python.data.sectors import SECTOR_MAP, DEFAULT_MAX_SECTOR_WEIGHT
+from python.monitoring.regime import RegimeDetector, RegimeState, fetch_spy_drawdown, fetch_vix
 
 # --- Logging with rotation (Fix #36) ---
 _log_formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -56,16 +59,50 @@ OPTIMIZER_METHOD = "hrp"
 MAX_POSITION_WEIGHT = 0.30
 MAX_PORTFOLIO_VAR_95 = 0.06
 MAX_DRAWDOWN_LIMIT = 0.15
-STOP_LOSS_PCT = 0.05  # 5% trailing stop-loss from entry price
-TAKE_PROFIT_PCT = 0.15  # 15% take-profit from entry price
+STOP_LOSS_PCT = 0.05  # 5% trailing stop-loss from entry price (fallback if ATR unavailable)
+TAKE_PROFIT_PCT = 0.15  # 15% take-profit from entry price (fallback if ATR unavailable)
+ATR_SL_MULTIPLIER = 2.0  # Stop-loss at 2x ATR below fill price
+ATR_TP_MULTIPLIER = 3.0  # Take-profit at 3x ATR above fill price (1.5:1 R:R ratio)
 SLEEP_AFTER_TRADE_HOURS = 12
 SLEEP_MARKET_CLOSED_HOURS = 1
 ORDER_POLL_INTERVAL_SECS = 2  # How often to poll for fill status
 ORDER_POLL_TIMEOUT_SECS = 60  # Max time to wait for a fill
 TERMINAL_ORDER_STATES = {"filled", "canceled", "cancelled", "expired", "rejected"}
 
+# --- Rebalancing schedule (Phase 1: Cost Reduction) ---
+# Weekly rebalancing reduces transaction costs by ~74% vs daily.
+# Wednesday chosen: avoids Monday/Friday effects, mid-week liquidity is higher.
+REBALANCE_DAY = 2  # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri
+REBALANCE_FREQUENCY = "weekly"  # "daily" or "weekly"
+
 # --- Alerting (Fix #37) ---
 ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL")  # Slack/Discord/generic webhook
+
+
+def should_rebalance_today() -> bool:
+    """Check if today is a rebalance day based on REBALANCE_FREQUENCY.
+
+    Weekly: only trade on REBALANCE_DAY (default Wednesday).
+    Daily: always trade (original behavior).
+    """
+    if REBALANCE_FREQUENCY == "daily":
+        return True
+    return datetime.now().weekday() == REBALANCE_DAY
+
+
+def _get_next_rebalance_date() -> datetime:
+    """Return the next rebalance date (for sleep calculation)."""
+    now = datetime.now()
+    if REBALANCE_FREQUENCY == "daily":
+        # Next business day
+        delta = 1 if now.weekday() < 4 else (7 - now.weekday())
+        return now.replace(hour=9, minute=30, second=0) + pd.Timedelta(days=delta)
+
+    # Weekly: find next occurrence of REBALANCE_DAY
+    days_ahead = REBALANCE_DAY - now.weekday()
+    if days_ahead <= 0:
+        days_ahead += 7
+    return now.replace(hour=9, minute=30, second=0) + pd.Timedelta(days=days_ahead)
 
 
 def _send_alert(message: str) -> None:
@@ -284,6 +321,8 @@ def run_trading_cycle(
     broker: AlpacaBroker,
     risk_manager: RiskManager,
     bridge: ExecutionBridge,
+    regime_detector: RegimeDetector | None = None,
+    regime_state: RegimeState | None = None,
 ) -> bool:
     """The core daily trading logic. Returns True if trades were executed."""
     logger.info("=" * 60)
@@ -330,9 +369,19 @@ def run_trading_cycle(
     # 2. Run the ML pipeline to get target weights
     logger.info("Running ML pipeline (train -> rank -> optimize)...")
     try:
+        # Get current position weights for turnover-aware optimization
+        current_positions = broker.list_positions()
+        account_info = broker.get_account()
+        current_weights = {}
+        if current_positions and account_info.equity > 0:
+            current_weights = {
+                p.symbol: p.market_value / account_info.equity for p in current_positions
+            }
+
         target_weights = get_ml_weights(
             top_n=TOP_N_STOCKS,
             method=OPTIMIZER_METHOD,
+            current_weights=current_weights if current_weights else None,
         )
     except Exception as e:
         logger.error(f"ML pipeline failed: {e}", exc_info=True)
@@ -346,6 +395,17 @@ def run_trading_cycle(
     logger.info(f"Target weights from ML pipeline ({len(target_weights)} positions):")
     for ticker, w in sorted(target_weights.items(), key=lambda x: -x[1]):
         logger.info(f"  {ticker}: {w:.2%}")
+
+    # Apply regime-based exposure adjustment (Phase 2: Risk Management)
+    if regime_detector is not None and regime_state is not None:
+        if regime_state.regime == "caution":
+            target_weights = regime_detector.adjust_weights(target_weights, regime_state.regime)
+            logger.info(
+                f"Regime-adjusted weights ({regime_state.regime}, "
+                f"{regime_state.exposure_multiplier:.0%} exposure):"
+            )
+            for ticker, w in sorted(target_weights.items(), key=lambda x: -x[1]):
+                logger.info(f"  {ticker}: {w:.2%}")
 
     # 3. Get current prices for order sizing (batch fetch, yfinance fallback)
     logger.info("Fetching current prices for order sizing...")
@@ -462,6 +522,7 @@ def run_trading_cycle(
             logger.info(f"  FILLED: {entry['side'].upper()} {entry['qty']:.4f} {entry['symbol']}")
 
             # Attach SL/TP orders anchored to actual fill price (Fix #33)
+            # Phase 2: Use ATR-based stops instead of fixed percentages
             if entry.get("needs_sl_tp") and result["filled_avg_price"] is not None:
                 try:
                     # Cancel any existing SL/TP orders for this symbol to prevent
@@ -469,8 +530,27 @@ def run_trading_cycle(
                     _cancel_existing_sl_tp_orders(broker, entry["symbol"])
 
                     fill_price = float(result["filled_avg_price"])
-                    sl_price = round(fill_price * (1 - STOP_LOSS_PCT), 2)
-                    tp_price = round(fill_price * (1 + TAKE_PROFIT_PCT), 2)
+
+                    # Try ATR-based stops first, fall back to fixed %
+                    atr = get_current_atr(entry["symbol"])
+                    if atr is not None and atr > 0:
+                        sl_price = round(fill_price - (ATR_SL_MULTIPLIER * atr), 2)
+                        tp_price = round(fill_price + (ATR_TP_MULTIPLIER * atr), 2)
+                        sl_label = f"{ATR_SL_MULTIPLIER}x ATR ({atr:.2f})"
+                        tp_label = f"{ATR_TP_MULTIPLIER}x ATR ({atr:.2f})"
+                    else:
+                        sl_price = round(fill_price * (1 - STOP_LOSS_PCT), 2)
+                        tp_price = round(fill_price * (1 + TAKE_PROFIT_PCT), 2)
+                        sl_label = f"{STOP_LOSS_PCT:.0%} fixed (ATR unavailable)"
+                        tp_label = f"{TAKE_PROFIT_PCT:.0%} fixed (ATR unavailable)"
+
+                    # Sanity: SL must be below fill, TP must be above
+                    if sl_price >= fill_price:
+                        sl_price = round(fill_price * (1 - STOP_LOSS_PCT), 2)
+                        sl_label = f"{STOP_LOSS_PCT:.0%} fixed (ATR sanity fallback)"
+                    if tp_price <= fill_price:
+                        tp_price = round(fill_price * (1 + TAKE_PROFIT_PCT), 2)
+                        tp_label = f"{TAKE_PROFIT_PCT:.0%} fixed (ATR sanity fallback)"
 
                     # Submit stop-loss
                     sl_order = BrokerOrder(
@@ -484,7 +564,7 @@ def run_trading_cycle(
                     sl_id = broker.submit_order(sl_order)
                     logger.info(
                         f"    SL attached: SELL {entry['symbol']} @ ${sl_price} "
-                        f"(-{STOP_LOSS_PCT:.0%} from fill ${fill_price:.2f}) -> {sl_id}"
+                        f"({sl_label} from fill ${fill_price:.2f}) -> {sl_id}"
                     )
 
                     # Submit take-profit
@@ -499,7 +579,7 @@ def run_trading_cycle(
                     tp_id = broker.submit_order(tp_order)
                     logger.info(
                         f"    TP attached: SELL {entry['symbol']} @ ${tp_price} "
-                        f"(+{TAKE_PROFIT_PCT:.0%} from fill ${fill_price:.2f}) -> {tp_id}"
+                        f"({tp_label} from fill ${fill_price:.2f}) -> {tp_id}"
                     )
                 except Exception as e:
                     logger.error(f"    Failed to attach SL/TP for {entry['symbol']}: {e}")
@@ -588,8 +668,12 @@ def main():
     logger.info("  LIVE TRADING BOT — ML-Driven")
     logger.info(f"  Universe: Top {TOP_N_STOCKS} S&P 500 by ML rank")
     logger.info(f"  Optimizer: {OPTIMIZER_METHOD.upper()}")
+    logger.info(f"  Rebalance: {REBALANCE_FREQUENCY} (day={REBALANCE_DAY})")
     logger.info(f"  Max position: {MAX_POSITION_WEIGHT:.0%}")
-    logger.info(f"  Stop-loss: {STOP_LOSS_PCT:.0%} | Take-profit: {TAKE_PROFIT_PCT:.0%}")
+    logger.info(
+        f"  Stop-loss: {ATR_SL_MULTIPLIER}x ATR (fallback {STOP_LOSS_PCT:.0%}) | "
+        f"Take-profit: {ATR_TP_MULTIPLIER}x ATR (fallback {TAKE_PROFIT_PCT:.0%})"
+    )
     logger.info(f"  Max drawdown: {MAX_DRAWDOWN_LIMIT:.0%}")
     logger.info("=" * 60)
 
@@ -623,8 +707,12 @@ def main():
         max_position_weight=MAX_POSITION_WEIGHT,
         max_portfolio_var_95=MAX_PORTFOLIO_VAR_95,
         max_drawdown_limit=MAX_DRAWDOWN_LIMIT,
+        max_sector_weight=DEFAULT_MAX_SECTOR_WEIGHT,
     )
-    risk_manager = RiskManager(limits=risk_limits)
+    risk_manager = RiskManager(limits=risk_limits, sector_map=SECTOR_MAP)
+
+    # Initialize regime detector for market condition monitoring (Phase 2)
+    regime_detector = RegimeDetector()
 
     # Initialize risk engine with current positions' historical data
     _initialize_risk_engine(broker, risk_manager)
@@ -640,6 +728,22 @@ def main():
             is_open = clock["is_open"]
 
             if is_open:
+                # Weekly rebalancing: skip non-rebalance days (Phase 1 cost reduction)
+                if not should_rebalance_today():
+                    next_rebal = _get_next_rebalance_date()
+                    logger.info(
+                        f"Not a rebalance day ({REBALANCE_FREQUENCY}, "
+                        f"day={REBALANCE_DAY}). Next rebalance: {next_rebal.date()}. "
+                        f"Sleeping until next market open..."
+                    )
+                    next_open = clock.get("next_open")
+                    if next_open:
+                        sleep_secs = _seconds_until(next_open)
+                        time.sleep(sleep_secs)
+                    else:
+                        time.sleep(60 * 60 * SLEEP_MARKET_CLOSED_HOURS)
+                    continue
+
                 # Check if already traded today (duplicate execution guard inside loop)
                 if _has_traded_today(broker):
                     logger.info("Already traded today. Skipping cycle.")
@@ -670,7 +774,37 @@ def main():
                     time.sleep(60 * 30)
                     continue
 
-                traded = run_trading_cycle(broker, risk_manager, bridge)
+                # Check market regime before trading (Phase 2: Risk Management)
+                vix = fetch_vix()
+                spy_dd = fetch_spy_drawdown()
+                if vix is not None and spy_dd is not None:
+                    regime_state = regime_detector.get_regime_state(vix, spy_dd)
+                    logger.info(f"Market regime: {regime_state.message}")
+
+                    if regime_state.regime == "halt":
+                        logger.warning(
+                            "Market regime HALT — skipping trade cycle. "
+                            "Consider closing all positions."
+                        )
+                        _send_alert(
+                            f"[LiveBot] Market regime HALT: VIX={vix:.1f}, "
+                            f"SPY drawdown={spy_dd:.1%}. Trading suspended."
+                        )
+                        time.sleep(60 * 60)  # Re-check in 1 hour
+                        continue
+                else:
+                    logger.warning(
+                        "Could not fetch regime data (VIX/SPY). Proceeding with normal exposure."
+                    )
+                    regime_state = None
+
+                traded = run_trading_cycle(
+                    broker,
+                    risk_manager,
+                    bridge,
+                    regime_detector=regime_detector,
+                    regime_state=regime_state,
+                )
 
                 # Persist state after trading cycle (P1-6)
                 _save_bot_state(

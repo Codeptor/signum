@@ -24,6 +24,7 @@ from python.data.ingestion import (
     fetch_ohlcv,
     reshape_ohlcv_wide_to_long,
 )
+from python.data.sectors import enforce_sector_constraints, get_sector_map
 from python.portfolio.optimizer import PortfolioOptimizer
 
 logger = logging.getLogger(__name__)
@@ -323,8 +324,18 @@ def optimize_weights(
     tickers: list[str],
     period: str = MIN_HISTORY_DAYS,
     method: str = "hrp",
+    current_weights: dict[str, float] | None = None,
+    turnover_threshold: float = 0.20,
 ) -> dict[str, float]:
     """Run portfolio optimization on selected tickers.
+
+    Args:
+        tickers: List of tickers to optimize.
+        period: Price history lookback period.
+        method: Optimization method ('hrp', 'min_cvar', 'risk_parity').
+        current_weights: Current portfolio weights for turnover-aware optimization.
+            If provided, rebalancing is skipped when turnover < turnover_threshold.
+        turnover_threshold: Minimum turnover to justify rebalancing (default 20%).
 
     Returns a dict of {ticker: weight}.
     """
@@ -344,9 +355,21 @@ def optimize_weights(
         n = len(surviving_tickers)
         return {t: 1.0 / n for t in surviving_tickers}
 
-    optimizer = PortfolioOptimizer(prices)
+    # Convert current_weights dict to Series for optimizer
+    cw_series = None
+    if current_weights:
+        cw_series = pd.Series(current_weights)
 
-    if method == "hrp":
+    optimizer = PortfolioOptimizer(
+        prices,
+        current_weights=cw_series,
+        turnover_threshold=turnover_threshold,
+    )
+
+    # Use turnover-aware optimization if current weights provided
+    if cw_series is not None:
+        weights = optimizer.optimize_with_turnover_penalty(method=method)
+    elif method == "hrp":
         weights = optimizer.hrp()
     elif method == "min_cvar":
         weights = optimizer.min_cvar()
@@ -364,7 +387,11 @@ def optimize_weights(
     if total > 0:
         weight_dict = {t: w / total for t, w in weight_dict.items()}
 
-    logger.info(f"Optimized weights ({method}):\n{weight_dict}")
+    # Apply sector constraints (Phase 2: Risk Management)
+    sector_map = get_sector_map(list(weight_dict.keys()))
+    weight_dict = enforce_sector_constraints(weight_dict, sector_map=sector_map)
+
+    logger.info(f"Optimized weights ({method}, sector-constrained):\n{weight_dict}")
     return weight_dict
 
 
@@ -372,10 +399,19 @@ def get_ml_weights(
     top_n: int = 10,
     method: str = "hrp",
     training_data_path: str | None = None,
+    current_weights: dict[str, float] | None = None,
+    turnover_threshold: float = 0.20,
 ) -> dict[str, float]:
     """End-to-end pipeline: train model -> rank S&P 500 -> optimize top N.
 
     This is the single entry point the live bot calls.
+
+    Args:
+        top_n: Number of top stocks to select.
+        method: Optimization method.
+        training_data_path: Optional path to cached training data.
+        current_weights: Current portfolio weights for turnover-aware optimization.
+        turnover_threshold: Minimum turnover to justify rebalancing.
 
     Returns dict of {ticker: target_weight}.
     """
@@ -404,7 +440,12 @@ def get_ml_weights(
 
     # Step 4: Optimize weights for the selected stocks
     logger.info(f"Step 4/4: Optimizing weights for {top_tickers}...")
-    weights = optimize_weights(top_tickers, method=method)
+    weights = optimize_weights(
+        top_tickers,
+        method=method,
+        current_weights=current_weights,
+        turnover_threshold=turnover_threshold,
+    )
 
     logger.info(f"=== ML Pipeline complete: {len(weights)} positions ===")
     for ticker, w in sorted(weights.items(), key=lambda x: -x[1]):

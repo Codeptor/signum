@@ -318,7 +318,12 @@ class TestGetMlWeightsOrchestration:
         assert weights == {"AAPL": 0.4, "MSFT": 0.35, "GOOG": 0.25}
         mock_train.assert_called_once()
         mock_rank.assert_called_once()
-        mock_optimize.assert_called_once_with(["AAPL", "MSFT", "GOOG"], method="hrp")
+        mock_optimize.assert_called_once_with(
+            ["AAPL", "MSFT", "GOOG"],
+            method="hrp",
+            current_weights=None,
+            turnover_threshold=0.2,
+        )
 
     @patch("python.alpha.predict.rank_stocks")
     @patch("python.alpha.predict.compute_features")

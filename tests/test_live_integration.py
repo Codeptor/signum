@@ -388,10 +388,11 @@ class TestFillVerification:
 class TestSLTPAttachment:
     """Verify stop-loss and take-profit orders use fill price."""
 
+    @patch("examples.live_bot.get_current_atr")
     @patch("examples.live_bot.get_ml_weights")
     @patch("time.sleep", return_value=None)
-    def test_sl_tp_anchored_to_fill_price(self, _sleep, mock_ml, account, risk_manager):
-        """SL/TP are computed from the broker fill price, not quoted price."""
+    def test_sl_tp_anchored_to_fill_price(self, _sleep, mock_ml, mock_atr, account, risk_manager):
+        """SL/TP are computed from ATR when available, falling back to fixed %."""
         # Use specific prices so we can verify SL/TP arithmetic
         fill_price = 200.0
         prices = {"AAPL": fill_price}
@@ -399,12 +400,16 @@ class TestSLTPAttachment:
         target_weights = {"AAPL": 1.0}
         mock_ml.return_value = target_weights
 
+        # Return a known ATR value so stops are deterministic
+        atr_value = 6.7
+        mock_atr.return_value = atr_value
+
         broker = MockBroker(account=account, prices=prices)
         bridge = ExecutionBridge(
             risk_manager=risk_manager, initial_capital=100_000.0, commission_rate=0.0
         )
 
-        from examples.live_bot import STOP_LOSS_PCT, TAKE_PROFIT_PCT, run_trading_cycle
+        from examples.live_bot import ATR_SL_MULTIPLIER, ATR_TP_MULTIPLIER, run_trading_cycle
 
         run_trading_cycle(broker, risk_manager, bridge)
 
@@ -417,8 +422,8 @@ class TestSLTPAttachment:
         assert len(stop_orders) == 1
         assert len(limit_orders) == 1
 
-        expected_sl = round(fill_price * (1 - STOP_LOSS_PCT), 2)
-        expected_tp = round(fill_price * (1 + TAKE_PROFIT_PCT), 2)
+        expected_sl = round(fill_price - (ATR_SL_MULTIPLIER * atr_value), 2)
+        expected_tp = round(fill_price + (ATR_TP_MULTIPLIER * atr_value), 2)
 
         assert stop_orders[0].stop_price == expected_sl
         assert limit_orders[0].limit_price == expected_tp
