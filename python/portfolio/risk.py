@@ -150,8 +150,9 @@ class RiskEngine:
     # =========================================================================
 
     def sharpe_ratio(self) -> float:
-        """Annualized Sharpe ratio."""
-        excess_return = self.portfolio_returns.mean() * self.ann_factor - self.rf_rate
+        """Annualized Sharpe ratio (geometric annualization for returns, Fix #40)."""
+        geo_ann_return = (1 + self.portfolio_returns.mean()) ** self.ann_factor - 1
+        excess_return = geo_ann_return - self.rf_rate
         vol = self.volatility(annualized=True)
         return excess_return / vol if vol > 0 else 0.0
 
@@ -160,7 +161,8 @@ class RiskEngine:
         Sortino ratio using downside deviation only.
         Better than Sharpe for asymmetric returns.
         """
-        excess_return = self.portfolio_returns.mean() * self.ann_factor - self.rf_rate
+        geo_ann_return = (1 + self.portfolio_returns.mean()) ** self.ann_factor - 1
+        excess_return = geo_ann_return - self.rf_rate
         dd = self.downside_deviation(threshold=threshold, annualized=True)
         return excess_return / dd if dd > 0 else 0.0
 
@@ -169,7 +171,7 @@ class RiskEngine:
         Calmar ratio (annual return / max drawdown).
         Focuses on capital preservation.
         """
-        annual_return = self.portfolio_returns.mean() * self.ann_factor
+        annual_return = (1 + self.portfolio_returns.mean()) ** self.ann_factor - 1
         max_dd = abs(self.max_drawdown())
         return annual_return / max_dd if max_dd > 0 else 0.0
 

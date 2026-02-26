@@ -26,8 +26,7 @@ def walk_forward_split(
         test_start = min_train + embargo_days + i * test_size
         test_end = test_start + test_size if i < n_splits - 1 else n
         train_end = test_start - embargo_days
-        train_start = max(0, train_end - int(train_end * train_pct / (1 - train_pct + 1e-9)))
-        # For expanding window, use all available history
+        # Expanding window: use all available history (Fix #39)
         train_start = 0
 
         if train_start >= train_end or test_start >= n:
@@ -56,9 +55,7 @@ def deflated_sharpe_ratio(
     e_max = stats.norm.ppf(1 - 1 / n_trials) * (1 - 0.5772 / np.log(n_trials))
 
     # Standard error of Sharpe
-    se = np.sqrt(
-        (1 - skewness * sharpe + (kurtosis - 1) / 4 * sharpe**2) / n_observations
-    )
+    se = np.sqrt((1 - skewness * sharpe + (kurtosis - 1) / 4 * sharpe**2) / n_observations)
 
     # Probability that the observed Sharpe exceeds the expected max under null
     dsr = stats.norm.cdf((sharpe - e_max) / se)
