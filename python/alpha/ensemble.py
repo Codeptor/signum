@@ -142,10 +142,12 @@ class ModelEnsemble:
         early_stop_df: Optional[pd.DataFrame] = None
         ic_cal_df: Optional[pd.DataFrame] = None
         if val_df is not None and len(val_df) > 20:
-            n_val = len(val_df)
-            mid = n_val // 2
-            early_stop_df = val_df.iloc[:mid]
-            ic_cal_df = val_df.iloc[mid:]
+            # Date-based split (not iloc) — iloc is wrong for panel data
+            # where multiple tickers share the same date.
+            val_dates = val_df.index.get_level_values(0).unique().sort_values()
+            mid_date = val_dates[len(val_dates) // 2]
+            early_stop_df = val_df.loc[val_df.index.get_level_values(0) < mid_date]
+            ic_cal_df = val_df.loc[val_df.index.get_level_values(0) >= mid_date]
             logger.info(
                 f"  H-ICVAL: split val into early-stop ({len(early_stop_df)}) "
                 f"and IC-cal ({len(ic_cal_df)})"
