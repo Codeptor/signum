@@ -742,6 +742,23 @@ def run_trading_cycle(
             for ticker, w in sorted(target_weights.items(), key=lambda x: -x[1]):
                 logger.info(f"  {ticker}: {w:.2%}")
 
+    # 2b. Apply graduated drawdown deleveraging
+    # Smoothly reduces exposure between dd_deleverage_start and dd_hard_limit
+    # instead of binary kill switch. Already updated in check_portfolio_risk.
+    dd_state = risk_manager.last_drawdown_state
+    if dd_state is not None and dd_state.is_deleveraging:
+        factor = dd_state.exposure_factor
+        target_weights = {t: w * factor for t, w in target_weights.items()}
+        in_caution_mode = True  # Prevent renorm from undoing the reduction
+        logger.warning(
+            f"Drawdown control: {abs(dd_state.current_drawdown):.2%} drawdown — "
+            f"scaling exposure to {factor:.0%}"
+        )
+        _send_alert(
+            f"Drawdown deleveraging active: {abs(dd_state.current_drawdown):.2%} "
+            f"drawdown, exposure scaled to {factor:.0%}",
+        )
+
     # 3. Get current prices for order sizing (batch fetch, yfinance fallback)
     logger.info("Fetching current prices for order sizing...")
     prices = broker.get_latest_prices(list(target_weights.keys()))

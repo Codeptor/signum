@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 
 from python.data.config import RISK_FREE_RATE
+from python.portfolio.drawdown_control import DrawdownController, DrawdownState
 from python.portfolio.risk import RiskEngine
 
 
@@ -48,6 +49,11 @@ class RiskLimits:
     reduce_size_high_vol: bool = True  # Reduce positions in high vol
     high_vol_threshold: float = 0.25  # 25% annualized vol
 
+    # Drawdown control (graduated deleveraging)
+    dd_deleverage_start: float = 0.08  # Start deleveraging at 8% drawdown
+    dd_hard_limit: float = 0.15  # Full exit at 15% drawdown
+    dd_recovery_threshold: float = 0.04  # Re-lever after recovering to 4%
+
 
 class RiskManager:
     """
@@ -82,6 +88,14 @@ class RiskManager:
         self.daily_turnover: Dict[str, float] = {}
         self.risk_engine: Optional[RiskEngine] = None
         self.current_weights: pd.Series = pd.Series(dtype=float)
+
+        # Graduated drawdown control
+        self.drawdown_controller = DrawdownController(
+            max_dd=self.limits.dd_deleverage_start,
+            hard_limit=self.limits.dd_hard_limit,
+            recovery_threshold=self.limits.dd_recovery_threshold,
+        )
+        self.last_drawdown_state: Optional[DrawdownState] = None
 
     def initialize_portfolio_risk(
         self,
@@ -352,16 +366,37 @@ class RiskManager:
                 )
             )
 
-        # 2. Drawdown limit (C-DD fix: prefer live equity curve over historical)
+        # 2. Graduated drawdown control — updates DrawdownController state
+        #    and reports exposure factor. The controller provides smooth
+        #    deleveraging instead of binary kill switch.
         if live_equity_curve and len(live_equity_curve) >= 2:
             import numpy as np
 
             equity_arr = np.array(live_equity_curve)
-            running_max = np.maximum.accumulate(equity_arr)
-            drawdowns = (equity_arr - running_max) / running_max
-            max_dd = abs(float(drawdowns.min()))
+            current_equity = equity_arr[-1]
+            # Update drawdown controller with current equity
+            dd_state = self.drawdown_controller.update(current_equity)
+            self.last_drawdown_state = dd_state
+            max_dd = abs(dd_state.current_drawdown)
         else:
             max_dd = abs(self.risk_engine.max_drawdown())
+            dd_state = None
+
+        # Report graduated deleveraging
+        if dd_state is not None and dd_state.is_deleveraging:
+            checks.append(
+                RiskCheck(
+                    passed=False,
+                    rule="DRAWDOWN_DELEVERAGING",
+                    message=f"Drawdown {max_dd:.2%} — deleveraging to "
+                    f"{dd_state.exposure_factor:.0%} exposure",
+                    severity="warning",
+                    metric_value=max_dd,
+                    limit_value=self.limits.dd_deleverage_start,
+                )
+            )
+
+        # Hard drawdown limit — full liquidation trigger
         if max_dd > self.limits.max_drawdown_limit:
             checks.append(
                 RiskCheck(
@@ -489,6 +524,17 @@ class RiskManager:
                 "max_position": self.limits.max_position_weight,
                 "max_daily_trades": self.limits.max_daily_trades,
                 "max_var": self.limits.max_portfolio_var_95,
+            },
+            "drawdown_control": {
+                "is_deleveraging": self.last_drawdown_state.is_deleveraging
+                if self.last_drawdown_state
+                else False,
+                "exposure_factor": self.last_drawdown_state.exposure_factor
+                if self.last_drawdown_state
+                else 1.0,
+                "current_drawdown": self.last_drawdown_state.current_drawdown
+                if self.last_drawdown_state
+                else 0.0,
             },
         }
 
