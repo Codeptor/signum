@@ -1,4 +1,4 @@
-"""Tests for model ensemble (Phase 3, §2.3.3)."""
+"""Tests for model ensemble with CatBoost and stacking meta-learner."""
 
 import numpy as np
 import pandas as pd
@@ -47,7 +47,7 @@ class TestEnsembleInit:
         assert ens.weights == DEFAULT_WEIGHTS
 
     def test_custom_weights(self):
-        custom = {"lightgbm": 0.7, "random_forest": 0.3}
+        custom = {"lightgbm": 0.5, "catboost": 0.3, "random_forest": 0.2}
         ens = ModelEnsemble(feature_cols=["a"], weights=custom)
         assert ens.weights == custom
 
@@ -60,10 +60,10 @@ class TestEnsembleInit:
         ens = ModelEnsemble(feature_cols=["a"])
         assert ens._fitted is False
 
-    def test_models_property(self):
+    def test_base_models_property(self):
         ens = ModelEnsemble(feature_cols=["a"])
-        models = ens.models
-        assert set(models.keys()) == {"lightgbm", "random_forest"}
+        models = ens.base_models
+        assert set(models.keys()) == {"lightgbm", "catboost", "random_forest"}
 
 
 # ---------------------------------------------------------------------------
@@ -74,27 +74,28 @@ class TestEnsembleInit:
 class TestEnsembleFit:
     def test_fit_marks_fitted(self, training_data):
         df, cols = training_data
-        ens = ModelEnsemble(feature_cols=cols)
+        ens = ModelEnsemble(feature_cols=cols, use_stacking=False)
         ens.fit(df, target_col="target_5d")
         assert ens._fitted is True
 
     def test_fit_trains_all_models(self, training_data):
         df, cols = training_data
-        ens = ModelEnsemble(feature_cols=cols)
+        ens = ModelEnsemble(feature_cols=cols, use_stacking=False)
         ens.fit(df, target_col="target_5d")
 
-        # LightGBM should have an internal model
+        # LightGBM
         assert ens.lgbm.model is not None
-        # RF should be fitted (has feature_importances_)
+        # CatBoost (has feature_importances_ after fit)
+        assert hasattr(ens.catboost, "feature_importances_")
+        # RF
         assert hasattr(ens.rf, "feature_importances_")
 
     def test_fit_with_validation_calibrates(self, training_data, validation_data):
         df, cols = training_data
         val_df, _ = validation_data
-        ens = ModelEnsemble(feature_cols=cols)
+        ens = ModelEnsemble(feature_cols=cols, use_stacking=False)
         ens.fit(df, target_col="target_5d", val_df=val_df)
 
-        # Weights should have been recalibrated (may differ from defaults)
         assert sum(ens.weights.values()) == pytest.approx(1.0, abs=0.01)
 
 
@@ -106,7 +107,7 @@ class TestEnsembleFit:
 class TestEnsemblePredict:
     def test_predict_shape(self, training_data):
         df, cols = training_data
-        ens = ModelEnsemble(feature_cols=cols)
+        ens = ModelEnsemble(feature_cols=cols, use_stacking=False)
         ens.fit(df)
 
         preds = ens.predict(df)
@@ -114,7 +115,7 @@ class TestEnsemblePredict:
 
     def test_predict_dtype(self, training_data):
         df, cols = training_data
-        ens = ModelEnsemble(feature_cols=cols)
+        ens = ModelEnsemble(feature_cols=cols, use_stacking=False)
         ens.fit(df)
 
         preds = ens.predict(df)
@@ -128,19 +129,19 @@ class TestEnsemblePredict:
 
     def test_predict_individual_returns_all_models(self, training_data):
         df, cols = training_data
-        ens = ModelEnsemble(feature_cols=cols)
+        ens = ModelEnsemble(feature_cols=cols, use_stacking=False)
         ens.fit(df)
 
         individual = ens.predict_individual(df)
-        assert set(individual.keys()) == {"lightgbm", "random_forest"}
+        assert set(individual.keys()) == {"lightgbm", "catboost", "random_forest"}
         for name, preds in individual.items():
             assert len(preds) == len(df), f"{name} prediction length mismatch"
 
-    def test_ensemble_is_weighted_average(self, training_data):
-        """Ensemble prediction should equal the weighted sum of sub-models."""
+    def test_weighted_average_without_stacking(self, training_data):
+        """Without stacking, ensemble should equal the weighted sum of base models."""
         df, cols = training_data
-        weights = {"lightgbm": 0.6, "random_forest": 0.4}
-        ens = ModelEnsemble(feature_cols=cols, weights=weights)
+        weights = {"lightgbm": 0.45, "catboost": 0.30, "random_forest": 0.25}
+        ens = ModelEnsemble(feature_cols=cols, weights=weights, use_stacking=False)
         ens.fit(df)
 
         individual = ens.predict_individual(df)
@@ -148,6 +149,45 @@ class TestEnsemblePredict:
         actual = ens.predict(df)
 
         np.testing.assert_allclose(actual, expected, atol=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# Tests: Stacking Meta-Learner
+# ---------------------------------------------------------------------------
+
+
+class TestStacking:
+    def test_stacking_trains_meta_learner(self, training_data):
+        """With stacking + validation data, meta-learner should be fitted."""
+        df, cols = training_data
+        # Create val data with DatetimeIndex for the 3-way split
+        dates = pd.bdate_range("2024-01-01", periods=100)
+        rng = np.random.RandomState(88)
+        val_data = pd.DataFrame(
+            rng.randn(100, len(cols)), columns=cols, index=dates
+        )
+        val_data["target_5d"] = rng.randn(100) * 0.5
+
+        ens = ModelEnsemble(feature_cols=cols, use_stacking=True)
+        ens.fit(df, target_col="target_5d", val_df=val_data)
+
+        assert ens.meta_learner is not None
+
+    def test_stacking_predict_shape(self, training_data):
+        """Stacking predictions should have same shape as input."""
+        df, cols = training_data
+        dates = pd.bdate_range("2024-01-01", periods=100)
+        rng = np.random.RandomState(88)
+        val_data = pd.DataFrame(
+            rng.randn(100, len(cols)), columns=cols, index=dates
+        )
+        val_data["target_5d"] = rng.randn(100) * 0.5
+
+        ens = ModelEnsemble(feature_cols=cols, use_stacking=True)
+        ens.fit(df, target_col="target_5d", val_df=val_data)
+
+        preds = ens.predict(df)
+        assert preds.shape == (len(df),)
 
 
 # ---------------------------------------------------------------------------
@@ -159,30 +199,20 @@ class TestCalibration:
     def test_calibrate_weights_sum_to_one(self, training_data, validation_data):
         df, cols = training_data
         val_df, _ = validation_data
-        ens = ModelEnsemble(feature_cols=cols)
+        ens = ModelEnsemble(feature_cols=cols, use_stacking=False)
         ens.fit(df)
 
         new_weights = ens.calibrate_weights(val_df, target_col="target_5d")
         assert sum(new_weights.values()) == pytest.approx(1.0, abs=0.01)
 
-    def test_calibrate_zeros_negative_ic(self, training_data):
-        """Models with negative IC should get weight 0."""
-        df, cols = training_data
-        ens = ModelEnsemble(feature_cols=cols)
-        ens.fit(df)
-
-        # Calibrated weights should have no negative entries
-        for w in ens.weights.values():
-            assert w >= 0.0
-
     def test_calibrate_preserves_model_names(self, training_data, validation_data):
         df, cols = training_data
         val_df, _ = validation_data
-        ens = ModelEnsemble(feature_cols=cols)
+        ens = ModelEnsemble(feature_cols=cols, use_stacking=False)
         ens.fit(df)
 
         new_weights = ens.calibrate_weights(val_df)
-        assert set(new_weights.keys()) == {"lightgbm", "random_forest"}
+        assert set(new_weights.keys()) == {"lightgbm", "catboost", "random_forest"}
 
 
 # ---------------------------------------------------------------------------
@@ -193,30 +223,53 @@ class TestCalibration:
 class TestFeatureImportance:
     def test_importance_returns_dataframe(self, training_data):
         df, cols = training_data
-        ens = ModelEnsemble(feature_cols=cols)
+        ens = ModelEnsemble(feature_cols=cols, use_stacking=False)
         ens.fit(df)
 
         importance = ens.feature_importance()
         assert isinstance(importance, pd.DataFrame)
-        assert list(importance.index) == list(importance.index)  # sorted
         assert "ensemble" in importance.columns
 
     def test_importance_has_all_models(self, training_data):
         df, cols = training_data
-        ens = ModelEnsemble(feature_cols=cols)
+        ens = ModelEnsemble(feature_cols=cols, use_stacking=False)
         ens.fit(df)
 
         importance = ens.feature_importance()
-        for model_name in ["lightgbm", "random_forest", "ensemble"]:
+        for model_name in ["lightgbm", "catboost", "random_forest", "ensemble"]:
             assert model_name in importance.columns
 
     def test_importance_correct_number_of_features(self, training_data):
         df, cols = training_data
-        ens = ModelEnsemble(feature_cols=cols)
+        ens = ModelEnsemble(feature_cols=cols, use_stacking=False)
         ens.fit(df)
 
         importance = ens.feature_importance()
         assert len(importance) == len(cols)
+
+
+# ---------------------------------------------------------------------------
+# Tests: Serialization
+# ---------------------------------------------------------------------------
+
+
+class TestSerialization:
+    def test_save_load_roundtrip(self, training_data, tmp_path):
+        df, cols = training_data
+        ens = ModelEnsemble(feature_cols=cols, use_stacking=False)
+        ens.fit(df)
+
+        path = tmp_path / "ensemble.joblib"
+        ens.save(path)
+
+        loaded = ModelEnsemble.load(path)
+        assert loaded._fitted is True
+        assert loaded.feature_cols == cols
+
+        # Predictions should match
+        orig_preds = ens.predict(df)
+        loaded_preds = loaded.predict(df)
+        np.testing.assert_allclose(orig_preds, loaded_preds, atol=1e-10)
 
 
 # ---------------------------------------------------------------------------

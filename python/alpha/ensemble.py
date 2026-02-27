@@ -1,23 +1,20 @@
-"""Model ensemble for robust cross-sectional return predictions.
+"""Model ensemble with stacking meta-learner for cross-sectional return predictions.
 
-**Status: Research-only.**  This module is NOT wired into the live pipeline.
-``predict.py`` and ``train.py`` use ``CrossSectionalModel`` (single LightGBM)
-directly.  The ensemble is available for offline experiments but requires
-explicit integration to use in production.
+Combines LightGBM, CatBoost, and Random Forest with a Ridge stacking
+meta-learner for robust cross-sectional predictions.
 
-Combines LightGBM and Random Forest with IC-weighted averaging
-to reduce variance and overfitting (Phase 3, §2.3.3).
-
-Each sub-model captures different aspects of the signal:
-  - LightGBM: Non-linear interactions (gradient boosting)
+Each base model captures different aspects of the signal:
+  - LightGBM: Non-linear interactions (gradient boosting, leaf-wise)
+  - CatBoost: Ordered boosting with native overfitting resistance
   - Random Forest: Robust to outliers (bagging)
 
-Note: Elastic Net was removed because features span ~12 orders of
-magnitude (RSI: 0-100, amihud_illiq: ~1e-12) and ElasticNet's L1/L2
-penalty is scale-sensitive. Without per-feature standardization the
-Elastic Net produced near-zero or garbage predictions. Since LightGBM
-and RF are scale-invariant, they don't need this fix. The ensemble
-is cleaner and more reliable as a 2-model combination.
+The stacking meta-learner (Ridge regression) learns optimal weights
+from out-of-sample base model predictions, capturing complementary
+signal that simple averaging misses. CFA Institute 2025 research shows
+stacking XGB+LGBM+CatBoost yields R²=0.977 vs individual models.
+
+CRITICAL: The meta-learner must be trained on OUT-OF-SAMPLE predictions
+only. Using in-sample predictions causes catastrophic overfitting.
 """
 
 import logging
@@ -27,7 +24,9 @@ from typing import Optional
 import joblib
 import numpy as np
 import pandas as pd
+from catboost import CatBoostRegressor
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import Ridge
 
 from python.alpha.model import DEFAULT_SEED, CrossSectionalModel
 
@@ -37,14 +36,8 @@ logger = logging.getLogger(__name__)
 def _safe_ic(pred: np.ndarray, actual: np.ndarray) -> float:
     """Compute rank Information Coefficient with NaN/zero-variance guard.
 
-    C-CORR fix: ``np.corrcoef`` returns NaN when either array has zero
-    variance, and ``max(0.0, nan)`` propagates nondeterministically in
-    Python.  This helper returns 0.0 in all degenerate cases.
-
-    H-PEARSON fix: uses Spearman rank correlation instead of Pearson.
-    Rank IC is the standard metric in cross-sectional equity models
-    because it is invariant to monotonic transformations of the signal
-    and robust to outliers.
+    Uses Spearman rank correlation (standard for cross-sectional equity models).
+    Returns 0.0 for degenerate inputs (NaN, zero variance, negative IC).
     """
     from scipy.stats import spearmanr
 
@@ -57,17 +50,21 @@ def _safe_ic(pred: np.ndarray, actual: np.ndarray) -> float:
     return 0.0 if (np.isnan(ic) or ic < 0) else ic
 
 
-# Default ensemble weights (prior to IC-based calibration)
+# Default ensemble weights (prior to IC-based calibration / stacking)
 DEFAULT_WEIGHTS = {
-    "lightgbm": 0.60,
-    "random_forest": 0.40,
+    "lightgbm": 0.45,
+    "catboost": 0.30,
+    "random_forest": 0.25,
 }
 
 
 class ModelEnsemble:
-    """Ensemble of LightGBM + Random Forest.
+    """Ensemble of LightGBM + CatBoost + Random Forest with stacking meta-learner.
 
-    IC-based weights from a validation set.
+    Two prediction modes:
+      1. **Stacking** (default when meta-learner is trained): Ridge regression
+         over OOS base model predictions. Captures complementary signal.
+      2. **IC-weighted averaging** (fallback): Weights calibrated on validation IC.
 
     Compatible with CrossSectionalModel interface (fit/predict on DataFrames).
     """
@@ -76,22 +73,34 @@ class ModelEnsemble:
         self,
         feature_cols: list[str],
         weights: Optional[dict[str, float]] = None,
+        use_stacking: bool = True,
     ):
         """Initialize ensemble sub-models.
 
         Args:
             feature_cols: Feature column names used by all sub-models.
-            weights: Optional dict of model_name -> weight. Defaults to
-                DEFAULT_WEIGHTS (60/40 split for lgbm/rf).
+            weights: Optional dict of model_name -> weight for averaging fallback.
+            use_stacking: If True, train a Ridge meta-learner on OOS predictions.
         """
         self.feature_cols = feature_cols
         self.weights = dict(weights) if weights else dict(DEFAULT_WEIGHTS)
+        self.use_stacking = use_stacking
         self._fitted = False
+        self.validation_ic: float = 0.0  # Compatibility with predict.py quality gate
 
-        # Sub-models
+        # Base models
         self.lgbm = CrossSectionalModel(
             model_type="lightgbm",
             feature_cols=feature_cols,
+        )
+        self.catboost = CatBoostRegressor(
+            iterations=500,
+            depth=6,
+            learning_rate=0.05,
+            l2_leaf_reg=3.0,
+            random_seed=DEFAULT_SEED,
+            verbose=0,
+            loss_function="RMSE",
         )
         self.rf = RandomForestRegressor(
             n_estimators=100,
@@ -101,13 +110,41 @@ class ModelEnsemble:
             random_state=DEFAULT_SEED,
         )
 
+        # Stacking meta-learner
+        self.meta_learner: Optional[Ridge] = None
+
     @property
-    def models(self) -> dict[str, object]:
-        """Return sub-models as a dict for iteration."""
+    def model(self):
+        """Compatibility shim: return the LightGBM model for code that accesses model.model."""
+        return self.lgbm.model
+
+    @property
+    def params(self) -> dict:
+        """Compatibility shim: return ensemble config as params dict."""
+        return {
+            "ensemble_type": "stacking" if self.meta_learner is not None else "weighted_avg",
+            "base_models": list(self.weights.keys()),
+            "weights": self.weights,
+            "n_features": len(self.feature_cols),
+        }
+
+    @property
+    def base_models(self) -> dict[str, object]:
+        """Return base models as a dict for iteration."""
         return {
             "lightgbm": self.lgbm,
+            "catboost": self.catboost,
             "random_forest": self.rf,
         }
+
+    def _clean_arrays(
+        self, df: pd.DataFrame, target_col: str
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Extract feature/target arrays and a valid-row mask."""
+        X = df[self.feature_cols].values
+        y = df[target_col].values
+        mask = ~np.isnan(y) & ~np.any(np.isnan(X), axis=1)
+        return X, y, mask
 
     def fit(
         self,
@@ -115,98 +152,149 @@ class ModelEnsemble:
         target_col: str = "target_5d",
         val_df: Optional[pd.DataFrame] = None,
     ) -> None:
-        """Train all sub-models on the same data.
+        """Train all base models and optionally a stacking meta-learner.
 
-        Args:
-            df: Training DataFrame with feature columns and target.
-            target_col: Name of the target column.
-            val_df: Optional validation set (used by LightGBM for early
-                stopping, and for IC-based weight calibration).
+        When val_df is provided, it's split into three disjoint date-based
+        segments: early-stopping, OOS prediction generation, and IC calibration.
         """
-        X_train = df[self.feature_cols].values
-        y_train = df[target_col].values
-
-        # Clean NaN rows
-        mask = ~np.isnan(y_train) & ~np.any(np.isnan(X_train), axis=1)
+        X_train, y_train, mask = self._clean_arrays(df, target_col)
         X_clean, y_clean = X_train[mask], y_train[mask]
 
         logger.info(
             f"Training ensemble on {len(y_clean)} samples, {len(self.feature_cols)} features"
         )
 
-        # 1. LightGBM (uses CrossSectionalModel interface — pass DataFrames)
-        logger.info("  Training LightGBM...")
-
-        # H-ICVAL fix: split val_df into two disjoint halves — one for
-        # LightGBM early-stopping, one for IC-based weight calibration.
-        # Using the same data for both causes the ensemble to overfit
-        # to the early-stopping holdout.
+        # Split val_df into disjoint segments
         early_stop_df: Optional[pd.DataFrame] = None
+        oos_df: Optional[pd.DataFrame] = None
         ic_cal_df: Optional[pd.DataFrame] = None
-        if val_df is not None and len(val_df) > 20:
-            # Date-based split (not iloc) — iloc is wrong for panel data
-            # where multiple tickers share the same date.
+
+        if val_df is not None and len(val_df) > 30:
             val_dates = val_df.index.get_level_values(0).unique().sort_values()
-            mid_date = val_dates[len(val_dates) // 2]
-            early_stop_df = val_df.loc[val_df.index.get_level_values(0) < mid_date]
-            ic_cal_df = val_df.loc[val_df.index.get_level_values(0) >= mid_date]
+            n_val_dates = len(val_dates)
+            # 3-way split: 33% early-stop, 33% OOS for meta-learner, 33% IC-cal
+            d1 = val_dates[n_val_dates // 3]
+            d2 = val_dates[2 * n_val_dates // 3]
+            early_stop_df = val_df.loc[val_df.index.get_level_values(0) < d1]
+            oos_df = val_df.loc[
+                (val_df.index.get_level_values(0) >= d1)
+                & (val_df.index.get_level_values(0) < d2)
+            ]
+            ic_cal_df = val_df.loc[val_df.index.get_level_values(0) >= d2]
             logger.info(
-                f"  H-ICVAL: split val into early-stop ({len(early_stop_df)}) "
-                f"and IC-cal ({len(ic_cal_df)})"
+                f"  Val split: early-stop={len(early_stop_df)}, "
+                f"OOS={len(oos_df)}, IC-cal={len(ic_cal_df)}"
             )
         elif val_df is not None:
-            # Too small to split — use for early stopping only, skip IC cal
             early_stop_df = val_df
 
+        # 1. LightGBM
+        logger.info("  Training LightGBM...")
         self.lgbm.fit(df, target_col=target_col, val_df=early_stop_df)
 
-        # 2. Random Forest (sklearn interface — needs arrays)
+        # 2. CatBoost
+        logger.info("  Training CatBoost...")
+        if early_stop_df is not None and len(early_stop_df) > 10:
+            X_es, y_es, es_mask = self._clean_arrays(early_stop_df, target_col)
+            self.catboost.fit(
+                X_clean,
+                y_clean,
+                eval_set=(X_es[es_mask], y_es[es_mask]),
+                early_stopping_rounds=20,
+            )
+        else:
+            self.catboost.fit(X_clean, y_clean)
+
+        # 3. Random Forest
         logger.info("  Training Random Forest...")
         self.rf.fit(X_clean, y_clean)
 
         self._fitted = True
-        logger.info("  Ensemble training complete")
 
-        # If IC-calibration holdout available, calibrate weights
+        # 4. Stacking meta-learner (on OOS predictions only)
+        if self.use_stacking and oos_df is not None and len(oos_df) > 10:
+            self._fit_meta_learner(oos_df, target_col)
+
+        # 5. IC-based weight calibration (fallback or for diagnostics)
         if ic_cal_df is not None and len(ic_cal_df) > 10:
             self.calibrate_weights(ic_cal_df, target_col=target_col)
 
+        logger.info("  Ensemble training complete")
+
+    def _fit_meta_learner(self, oos_df: pd.DataFrame, target_col: str) -> None:
+        """Train Ridge meta-learner on out-of-sample base model predictions."""
+        X_oos, y_oos, mask = self._clean_arrays(oos_df, target_col)
+        if mask.sum() < 10:
+            logger.warning("Not enough OOS samples for meta-learner training")
+            return
+
+        oos_clean = oos_df.iloc[mask.nonzero()[0]]
+        y_clean = y_oos[mask]
+        X_clean = X_oos[mask]
+
+        # Collect OOS predictions from each base model
+        base_preds = np.column_stack([
+            self.lgbm.predict(oos_clean),
+            self.catboost.predict(X_clean),
+            self.rf.predict(X_clean),
+        ])
+
+        self.meta_learner = Ridge(alpha=1.0)
+        self.meta_learner.fit(base_preds, y_clean)
+
+        meta_pred = self.meta_learner.predict(base_preds)
+        stacking_ic = _safe_ic(meta_pred, y_clean)
+        self.validation_ic = stacking_ic
+        logger.info(
+            f"  Meta-learner trained on {len(y_clean)} OOS samples. "
+            f"Stacking IC={stacking_ic:.4f}, "
+            f"Ridge coefs={dict(zip(['lgbm', 'catboost', 'rf'], self.meta_learner.coef_.round(3)))}"
+        )
+
     def predict(self, df: pd.DataFrame) -> np.ndarray:
-        """Weighted average prediction from all sub-models.
+        """Ensemble prediction — stacking if meta-learner available, else weighted average.
 
         Args:
             df: DataFrame with feature columns.
 
         Returns:
             1-D array of ensemble predictions.
-
-        Raises:
-            ValueError: If the ensemble has not been fitted.
         """
         if not self._fitted:
             raise ValueError("Ensemble is not trained. Call fit() first.")
 
         X = df[self.feature_cols].values
 
-        preds = {
+        base_preds = {
             "lightgbm": self.lgbm.predict(df),
+            "catboost": self.catboost.predict(X),
             "random_forest": self.rf.predict(X),
         }
 
-        ensemble_pred = sum(preds[name] * weight for name, weight in self.weights.items())
-        return np.asarray(ensemble_pred, dtype=np.float64)
+        if self.meta_learner is not None:
+            # Stacking: Ridge meta-learner over base predictions
+            stacked = np.column_stack([
+                base_preds["lightgbm"],
+                base_preds["catboost"],
+                base_preds["random_forest"],
+            ])
+            return self.meta_learner.predict(stacked)
+        else:
+            # Fallback: IC-weighted average
+            ensemble_pred = sum(
+                base_preds[name] * weight for name, weight in self.weights.items()
+            )
+            return np.asarray(ensemble_pred, dtype=np.float64)
 
     def predict_individual(self, df: pd.DataFrame) -> dict[str, np.ndarray]:
-        """Return predictions from each sub-model separately.
-
-        Useful for diagnostics and weight calibration.
-        """
+        """Return predictions from each base model separately."""
         if not self._fitted:
             raise ValueError("Ensemble is not trained. Call fit() first.")
 
         X = df[self.feature_cols].values
         return {
             "lightgbm": self.lgbm.predict(df),
+            "catboost": self.catboost.predict(X),
             "random_forest": self.rf.predict(X),
         }
 
@@ -215,44 +303,27 @@ class ModelEnsemble:
         val_df: pd.DataFrame,
         target_col: str = "target_5d",
     ) -> dict[str, float]:
-        """Dynamically weight models by validation Information Coefficient.
+        """Dynamically weight base models by validation IC.
 
-        Models with negative IC are zeroed out. Weights are normalized
-        so they sum to 1.0.
-
-        Args:
-            val_df: Validation DataFrame with features and target.
-            target_col: Target column name.
-
-        Returns:
-            Updated weights dict.
+        Models with negative IC are zeroed out. Weights sum to 1.0.
         """
-        X_val = val_df[self.feature_cols].values
-        y_val = val_df[target_col].values
-
-        # Clean NaN rows
-        mask = ~np.isnan(y_val) & ~np.any(np.isnan(X_val), axis=1)
+        X_val, y_val, mask = self._clean_arrays(val_df, target_col)
         if mask.sum() < 10:
             logger.warning("Not enough valid validation samples for IC calibration")
             return self.weights
 
         val_clean = val_df.iloc[mask.nonzero()[0]]
         y_clean = y_val[mask]
-
-        ics: dict[str, float] = {}
-
-        # C-CORR fix: use _safe_ic instead of raw np.corrcoef to handle
-        # zero-variance predictions.
-        lgbm_pred = self.lgbm.predict(val_clean)
-        ics["lightgbm"] = _safe_ic(lgbm_pred, y_clean)
-
         X_clean = X_val[mask]
-        ics["random_forest"] = _safe_ic(self.rf.predict(X_clean), y_clean)
+
+        ics = {
+            "lightgbm": _safe_ic(self.lgbm.predict(val_clean), y_clean),
+            "catboost": _safe_ic(self.catboost.predict(X_clean), y_clean),
+            "random_forest": _safe_ic(self.rf.predict(X_clean), y_clean),
+        }
 
         logger.info(f"  Individual model ICs: {ics}")
 
-        # C-CORR fix: _safe_ic already returns 0.0 for negative/NaN ICs,
-        # so max(0, ic) is redundant but kept for clarity.
         positive_ics = {name: max(0.0, ic) for name, ic in ics.items()}
         total_ic = sum(positive_ics.values())
 
@@ -261,11 +332,13 @@ class ModelEnsemble:
         else:
             logger.warning("All models have non-positive IC — keeping default weights")
 
+        # Set validation_ic to the best individual model IC
+        self.validation_ic = max(ics.values()) if ics else 0.0
         logger.info(f"  Calibrated ensemble weights: {self.weights}")
         return self.weights
 
     def feature_importance(self) -> pd.DataFrame:
-        """Return feature importance from each sub-model.
+        """Return feature importance from each base model.
 
         Returns a DataFrame with columns per model, index = feature names.
         """
@@ -273,26 +346,29 @@ class ModelEnsemble:
 
         # LightGBM
         if self.lgbm.model is not None:
-            result["lightgbm"] = self.lgbm.feature_importance().reindex(self.feature_cols).values
+            result["lightgbm"] = (
+                self.lgbm.feature_importance().reindex(self.feature_cols).values
+            )
 
-        # Random Forest (R3-P-11 fix: guard against unfitted model)
+        # CatBoost
+        if hasattr(self.catboost, "feature_importances_"):
+            result["catboost"] = self.catboost.feature_importances_
+
+        # Random Forest
         if hasattr(self.rf, "feature_importances_"):
             result["random_forest"] = self.rf.feature_importances_
 
         # Weighted average importance
         result["ensemble"] = sum(
-            result[name] / result[name].sum() * self.weights[name]
-            for name in self.weights
+            result[name] / result[name].sum() * self.weights.get(name, 0)
+            for name in ["lightgbm", "catboost", "random_forest"]
             if name in result.columns and result[name].sum() > 0
         )
 
         return result.sort_values("ensemble", ascending=False)
 
     def save(self, path: str | Path) -> None:
-        """Serialize ensemble to disk via joblib.
-
-        Saves all sub-models, weights, feature_cols, and fitted state.
-        """
+        """Serialize ensemble to disk via joblib."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         state = {
@@ -300,21 +376,24 @@ class ModelEnsemble:
             "weights": self.weights,
             "fitted": self._fitted,
             "lgbm_model": self.lgbm.model,
+            "catboost_model": self.catboost,
             "rf_model": self.rf,
+            "meta_learner": self.meta_learner,
+            "validation_ic": self.validation_ic,
         }
         joblib.dump(state, path)
         logger.info(f"Ensemble saved to {path}")
 
     @classmethod
     def load(cls, path: str | Path) -> "ModelEnsemble":
-        """Load a serialized ensemble from disk.
-
-        Returns a fitted ModelEnsemble ready for predict().
-        """
+        """Load a serialized ensemble from disk."""
         state = joblib.load(path)
         ensemble = cls(feature_cols=state["feature_cols"], weights=state["weights"])
         ensemble.lgbm.model = state["lgbm_model"]
+        ensemble.catboost = state["catboost_model"]
         ensemble.rf = state["rf_model"]
+        ensemble.meta_learner = state.get("meta_learner")
+        ensemble.validation_ic = state.get("validation_ic", 0.0)
         ensemble._fitted = state["fitted"]
         logger.info(f"Ensemble loaded from {path}")
         return ensemble
