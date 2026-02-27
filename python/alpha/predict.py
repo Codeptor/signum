@@ -78,6 +78,8 @@ _last_drift_report: dict | None = None
 # Module-level reference to the raw OHLCV fetched during the ML pipeline.
 # The live bot can access this to compute ATR without refetching.
 _last_raw_ohlcv: pd.DataFrame | None = None
+# Prediction scores for top-N stocks — used for confidence-weighted bet sizing.
+_last_prediction_scores: dict[str, float] | None = None
 
 
 def _persist_ohlcv_cache(raw_ohlcv: pd.DataFrame) -> None:
@@ -738,7 +740,81 @@ def rank_stocks(
     # Take top N by predicted return
     top = score_series.nlargest(top_n)
     logger.info(f"Top {top_n} stocks by ML score:\n{top}")
+
+    # Store prediction scores for confidence-weighted bet sizing
+    global _last_prediction_scores
+    _last_prediction_scores = top.to_dict()
+
     return list(top.index)
+
+
+def apply_confidence_sizing(
+    weights: dict[str, float],
+    prediction_scores: dict[str, float] | None = None,
+    blend_alpha: float = 0.3,
+) -> dict[str, float]:
+    """Apply confidence-weighted bet sizing to portfolio weights.
+
+    Blends HRP risk-based weights with model conviction (prediction scores).
+    Stocks with stronger model predictions get proportionally larger allocations.
+
+    This captures the core benefit of meta-labeling — variable bet sizing
+    based on conviction — using the primary model's prediction scores as
+    the confidence signal.
+
+    Parameters
+    ----------
+    weights : dict
+        Base weights from optimizer (e.g. HRP).
+    prediction_scores : dict, optional
+        Model prediction scores for each ticker.
+    blend_alpha : float
+        Blending parameter: 0 = pure HRP, 1 = pure conviction.
+        Default 0.3 tilts weights 30% toward higher-conviction picks.
+
+    Returns
+    -------
+    dict[str, float]
+        Confidence-adjusted weights, renormalized to sum to original total.
+    """
+    if not prediction_scores or not weights:
+        return weights
+
+    # Only use scores for tickers in the portfolio
+    scores = {t: prediction_scores.get(t, 0.0) for t in weights}
+
+    # Normalize scores to [0, 1] range
+    min_score = min(scores.values())
+    max_score = max(scores.values())
+    score_range = max_score - min_score
+
+    if score_range < 1e-12:
+        return weights  # All scores identical — no reweighting
+
+    normalized = {t: (s - min_score) / score_range for t, s in scores.items()}
+
+    # Convert to conviction weights (softmax-like)
+    total_norm = sum(normalized.values()) or 1.0
+    conviction_weights = {t: s / total_norm for t, s in normalized.items()}
+
+    # Blend: (1-alpha)*HRP + alpha*conviction
+    original_total = sum(weights.values())
+    blended = {}
+    for t in weights:
+        hrp_w = weights[t]
+        conv_w = conviction_weights.get(t, hrp_w) * original_total
+        blended[t] = (1 - blend_alpha) * hrp_w + blend_alpha * conv_w
+
+    # Renormalize to preserve original total weight
+    blended_total = sum(blended.values()) or 1.0
+    blended = {t: w * original_total / blended_total for t, w in blended.items()}
+
+    logger.info(
+        f"Confidence sizing (alpha={blend_alpha:.1f}): "
+        + ", ".join(f"{t}={weights[t]:.1%}->{blended[t]:.1%}" for t in sorted(weights))
+    )
+
+    return blended
 
 
 def optimize_weights(
@@ -995,6 +1071,14 @@ def get_ml_weights(
         turnover_threshold=turnover_threshold,
         max_weight=max_weight,
         price_data=raw_ohlcv,  # H11: reuse pre-fetched data
+    )
+
+    # Step 4b: Apply confidence-weighted bet sizing (meta-labeling lite)
+    # Tilts HRP weights toward higher-conviction picks using model scores.
+    weights = apply_confidence_sizing(
+        weights,
+        prediction_scores=_last_prediction_scores,
+        blend_alpha=0.3,
     )
 
     logger.info(f"=== ML Pipeline complete: {len(weights)} positions ===")
