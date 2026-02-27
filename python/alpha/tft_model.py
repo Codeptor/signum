@@ -73,8 +73,24 @@ class TFTAlphaModel:
         data = df.copy()
         data["ticker"] = data["ticker"].astype(str)
 
-        # Create sequential integer time index per ticker (avoids gaps from weekends)
-        data["time_idx"] = data.groupby("ticker").cumcount()
+        # Use global date rank as time index so all tickers share the same
+        # calendar-aligned axis. Per-ticker cumcount causes misaligned splits
+        # where the same time_idx maps to different calendar dates across tickers.
+        if hasattr(df.index, "get_level_values"):
+            try:
+                date_col = data.index.get_level_values(0) if not data.index.names == [None] else data["date"]
+            except Exception:
+                date_col = data.index
+        else:
+            date_col = data.index
+        # Reset index to work with columns
+        if "date" not in data.columns:
+            data = data.reset_index()
+            if "level_0" in data.columns:
+                data = data.rename(columns={"level_0": "date"})
+        unique_dates = sorted(data["date"].unique())
+        date_to_idx = {d: i for i, d in enumerate(unique_dates)}
+        data["time_idx"] = data["date"].map(date_to_idx)
 
         # Drop rows with NaN targets (filling with 0.0 fabricates zero-return labels)
         data = data.dropna(subset=[self.target_col])
