@@ -2,8 +2,9 @@
 Alerting module — multi-channel alert delivery for Signum trading bot.
 
 Supports:
-  - Email (SMTP) — primary channel for trade notifications
-  - Webhook (Slack/Discord/generic) — existing behavior, now centralized
+  - Email via SendGrid HTTP API (port 443, works on all VPS)
+  - Email via SMTP (fallback, blocked on DigitalOcean)
+  - Webhook (Slack/Discord/generic)
 
 Design principles:
   - Fire-and-forget: alerting failures NEVER propagate or mask real errors
@@ -56,14 +57,20 @@ _SEVERITY_PREFIX = {
 # Configuration — all from environment variables
 # ---------------------------------------------------------------------------
 
-# Email (SMTP)
+# SendGrid HTTP API (preferred — works on all VPS, uses port 443)
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "")
+SENDGRID_FROM_EMAIL = os.getenv("SENDGRID_FROM_EMAIL", "")
+
+# Email (SMTP) — fallback when SendGrid is not configured
 SMTP_HOST = os.getenv("SMTP_HOST", "")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 SMTP_FROM = os.getenv("SMTP_FROM", "")  # Sender address (defaults to SMTP_USER)
-ALERT_EMAIL_TO = os.getenv("ALERT_EMAIL_TO", "")  # Comma-separated recipients
 SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() in ("true", "1", "yes")
+
+# Recipients (shared by both SendGrid and SMTP)
+ALERT_EMAIL_TO = os.getenv("ALERT_EMAIL_TO", "")  # Comma-separated
 
 # Webhook (Slack/Discord/generic)
 ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "")
@@ -80,9 +87,19 @@ _last_heartbeat_ts: float = float("-inf")
 _HEARTBEAT_COOLDOWN_SECS = 3600  # At most one heartbeat per hour
 
 
-def _is_email_configured() -> bool:
-    """Check if email alerting has the minimum required config."""
+def _is_sendgrid_configured() -> bool:
+    """Check if SendGrid API is configured."""
+    return bool(SENDGRID_API_KEY and SENDGRID_FROM_EMAIL and ALERT_EMAIL_TO)
+
+
+def _is_smtp_configured() -> bool:
+    """Check if SMTP email is configured."""
     return bool(SMTP_HOST and SMTP_USER and SMTP_PASSWORD and ALERT_EMAIL_TO)
+
+
+def _is_email_configured() -> bool:
+    """Check if any email transport is configured."""
+    return _is_sendgrid_configured() or _is_smtp_configured()
 
 
 def _is_webhook_configured() -> bool:
@@ -104,13 +121,54 @@ def _is_rate_limited() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Email delivery
+# Email delivery — SendGrid (preferred) or SMTP (fallback)
 # ---------------------------------------------------------------------------
 
 
-def _send_email(subject: str, body_text: str, body_html: str | None = None) -> None:
-    """Send an email via SMTP. Runs in the calling thread (caller wraps in bg thread)."""
-    if not _is_email_configured():
+def _send_email_sendgrid(subject: str, body_text: str, body_html: str | None = None) -> None:
+    """Send email via SendGrid v3 HTTP API (uses port 443, not blocked)."""
+    if not _is_sendgrid_configured():
+        return
+
+    recipients = [r.strip() for r in ALERT_EMAIL_TO.split(",") if r.strip()]
+    if not recipients:
+        return
+
+    content = [{"type": "text/plain", "value": body_text}]
+    if body_html:
+        content.append({"type": "text/html", "value": body_html})
+
+    payload = json.dumps(
+        {
+            "personalizations": [{"to": [{"email": r} for r in recipients]}],
+            "from": {
+                "email": SENDGRID_FROM_EMAIL,
+                "name": "Signum Bot",
+            },
+            "subject": subject,
+            "content": content,
+        }
+    ).encode("utf-8")
+
+    try:
+        req = urllib.request.Request(
+            "https://api.sendgrid.com/v3/mail/send",
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {SENDGRID_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        resp = urllib.request.urlopen(req, timeout=15)
+        logger.debug(f"SendGrid email sent to {recipients}: {subject} (HTTP {resp.status})")
+    except Exception:
+        logger.debug("Failed to send SendGrid email", exc_info=True)
+
+
+def _send_email_smtp(subject: str, body_text: str, body_html: str | None = None) -> None:
+    """Send email via SMTP (fallback when SendGrid unavailable)."""
+    if not _is_smtp_configured():
         return
 
     sender = SMTP_FROM or SMTP_USER
@@ -140,9 +198,18 @@ def _send_email(subject: str, body_text: str, body_html: str | None = None) -> N
         server.login(SMTP_USER, SMTP_PASSWORD)
         server.sendmail(sender, recipients, msg.as_string())
         server.quit()
-        logger.debug(f"Email sent to {recipients}: {subject}")
+        logger.debug(f"SMTP email sent to {recipients}: {subject}")
     except Exception:
-        logger.debug("Failed to send email alert", exc_info=True)
+        logger.debug("Failed to send SMTP email", exc_info=True)
+
+
+def _send_email(subject: str, body_text: str, body_html: str | None = None) -> None:
+    """Send email via best available transport (SendGrid > SMTP)."""
+    if _is_sendgrid_configured():
+        _send_email_sendgrid(subject, body_text, body_html)
+    elif _is_smtp_configured():
+        _send_email_smtp(subject, body_text, body_html)
+    # else: no email transport configured — silently skip
 
 
 def _format_email_html(message: str, severity: AlertSeverity) -> str:
@@ -328,12 +395,20 @@ def send_trade_summary(
 
 def get_alerting_status() -> dict:
     """Return current alerting configuration status (for /healthz)."""
+    transport = "none"
+    if _is_sendgrid_configured():
+        transport = "sendgrid"
+    elif _is_smtp_configured():
+        transport = "smtp"
+
     return {
         "email_configured": _is_email_configured(),
+        "email_transport": transport,
         "webhook_configured": _is_webhook_configured(),
         "smtp_host": SMTP_HOST or None,
-        "recipients": [r.strip() for r in ALERT_EMAIL_TO.split(",") if r.strip()]
-        if ALERT_EMAIL_TO
-        else [],
-        "rate_limit": f"{_RATE_LIMIT_MAX_ALERTS}/{_RATE_LIMIT_WINDOW_SECS}s",
+        "sendgrid_configured": _is_sendgrid_configured(),
+        "recipients": (
+            [r.strip() for r in ALERT_EMAIL_TO.split(",") if r.strip()] if ALERT_EMAIL_TO else []
+        ),
+        "rate_limit": (f"{_RATE_LIMIT_MAX_ALERTS}/{_RATE_LIMIT_WINDOW_SECS}s"),
     }

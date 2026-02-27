@@ -333,6 +333,7 @@ class TestAlertingStatus:
 
         status = get_alerting_status()
         assert status["email_configured"] is True
+        assert status["email_transport"] == "smtp"
         assert status["webhook_configured"] is True
         assert status["smtp_host"] == "smtp.test.com"
         assert status["recipients"] == ["user@test.com"]
@@ -343,8 +344,21 @@ class TestAlertingStatus:
 
         status = get_alerting_status()
         assert status["email_configured"] is False
+        assert status["email_transport"] == "none"
         assert status["webhook_configured"] is False
         assert status["recipients"] == []
+
+    def test_status_sendgrid_transport(self, monkeypatch, _webhook_configured):
+        """Status reports SendGrid when configured."""
+        monkeypatch.setattr("python.monitoring.alerting.SENDGRID_API_KEY", "SG.test")
+        monkeypatch.setattr("python.monitoring.alerting.SENDGRID_FROM_EMAIL", "bot@test.com")
+        monkeypatch.setattr("python.monitoring.alerting.ALERT_EMAIL_TO", "user@test.com")
+        from python.monitoring.alerting import get_alerting_status
+
+        status = get_alerting_status()
+        assert status["email_configured"] is True
+        assert status["email_transport"] == "sendgrid"
+        assert status["sendgrid_configured"] is True
 
 
 # ===========================================================================
@@ -393,3 +407,68 @@ class TestEmailFormatting:
 
         html = _format_email_html("Oh no", AlertSeverity.CRITICAL)
         assert "#cc3333" in html
+
+
+# ===========================================================================
+# SendGrid transport
+# ===========================================================================
+
+
+class TestSendGridTransport:
+    def test_sendgrid_called_when_configured(self, monkeypatch):
+        """SendGrid HTTP API is used when SENDGRID_API_KEY is set."""
+        monkeypatch.setattr("python.monitoring.alerting.SENDGRID_API_KEY", "SG.testkey")
+        monkeypatch.setattr("python.monitoring.alerting.SENDGRID_FROM_EMAIL", "bot@test.com")
+        monkeypatch.setattr("python.monitoring.alerting.ALERT_EMAIL_TO", "user@test.com")
+        from python.monitoring.alerting import AlertSeverity, send_alert
+
+        with patch("python.monitoring.alerting.urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = MagicMock(status=202)
+            send_alert("test via sendgrid", AlertSeverity.INFO)
+
+            import threading
+
+            for t in threading.enumerate():
+                if t.daemon and t.name != "MainThread":
+                    t.join(timeout=5)
+
+            # Should have been called (for SendGrid API)
+            assert mock_urlopen.call_count >= 1
+            # Verify it hit the SendGrid endpoint
+            call_args = mock_urlopen.call_args_list
+            sendgrid_calls = [
+                c
+                for c in call_args
+                if hasattr(c[0][0], "full_url") and "sendgrid" in c[0][0].full_url
+            ]
+            assert len(sendgrid_calls) >= 1
+
+    def test_sendgrid_preferred_over_smtp(self, monkeypatch):
+        """When both SendGrid and SMTP are configured, SendGrid is used."""
+        monkeypatch.setattr("python.monitoring.alerting.SENDGRID_API_KEY", "SG.testkey")
+        monkeypatch.setattr("python.monitoring.alerting.SENDGRID_FROM_EMAIL", "bot@sg.com")
+        monkeypatch.setattr("python.monitoring.alerting.SMTP_HOST", "smtp.test.com")
+        monkeypatch.setattr("python.monitoring.alerting.SMTP_USER", "user@test.com")
+        monkeypatch.setattr("python.monitoring.alerting.SMTP_PASSWORD", "secret")
+        monkeypatch.setattr("python.monitoring.alerting.ALERT_EMAIL_TO", "user@test.com")
+        from python.monitoring.alerting import _send_email
+
+        with patch("python.monitoring.alerting._send_email_sendgrid") as mock_sg:
+            with patch("python.monitoring.alerting._send_email_smtp") as mock_smtp:
+                _send_email("test", "body")
+                mock_sg.assert_called_once()
+                mock_smtp.assert_not_called()
+
+    def test_sendgrid_failure_swallowed(self, monkeypatch):
+        """SendGrid API errors must never propagate."""
+        monkeypatch.setattr("python.monitoring.alerting.SENDGRID_API_KEY", "SG.testkey")
+        monkeypatch.setattr("python.monitoring.alerting.SENDGRID_FROM_EMAIL", "bot@sg.com")
+        monkeypatch.setattr("python.monitoring.alerting.ALERT_EMAIL_TO", "user@test.com")
+        from python.monitoring.alerting import _send_email_sendgrid
+
+        with patch(
+            "python.monitoring.alerting.urllib.request.urlopen",
+            side_effect=Exception("SendGrid down"),
+        ):
+            # Must not raise
+            _send_email_sendgrid("test", "body")
