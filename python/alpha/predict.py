@@ -4,6 +4,8 @@ This module is the glue between the ML model and the live trading bot.
 It handles the full pipeline from raw OHLCV data to target portfolio weights.
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
 import logging
@@ -11,6 +13,10 @@ import tempfile
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from python.alpha.ensemble import ModelEnsemble
 
 import joblib
 import numpy as np
@@ -140,7 +146,7 @@ def _load_ohlcv_cache() -> tuple[pd.DataFrame | None, bool]:
 
 def _load_cached_model(
     max_age_days: int | None = None,
-) -> tuple[CrossSectionalModel | None, bool]:
+) -> tuple[CrossSectionalModel | ModelEnsemble | None, bool]:
     """Load a cached model if it is recent enough.
 
     Args:
@@ -202,7 +208,7 @@ def _load_cached_model(
         return None, False
 
 
-def _save_model_cache(model: CrossSectionalModel) -> None:
+def _save_model_cache(model: CrossSectionalModel | ModelEnsemble) -> None:
     """Save a trained model with versioning (Fix #45).
 
     Creates a timestamped version file alongside the ``latest_model.joblib``
@@ -464,7 +470,7 @@ def train_model(
     data_path: str | None = None,
     force_retrain: bool = False,
     use_ensemble: bool = True,
-) -> CrossSectionalModel:
+) -> CrossSectionalModel | ModelEnsemble:
     """Train an ensemble model on historical S&P 500 data with purged CV.
 
     Pipeline:
@@ -633,7 +639,7 @@ def train_model(
 
 
 def rank_stocks(
-    model: CrossSectionalModel,
+    model: CrossSectionalModel | ModelEnsemble,
     featured_df: pd.DataFrame,
     top_n: int = 10,
 ) -> list[str]:
