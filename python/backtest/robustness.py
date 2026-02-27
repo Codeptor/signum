@@ -285,6 +285,18 @@ class StressTester:
         threshold = np.percentile(self.portfolio_returns, threshold_percentile)
         stress_mask = self.portfolio_returns <= threshold
 
+        # Guard: single-asset portfolios have no pairwise correlations
+        if self.returns.shape[1] < 2:
+            return {
+                "threshold_return": float(threshold),
+                "threshold_return_pct": float(threshold * 100),
+                "stress_periods": int(stress_mask.sum()),
+                "avg_correlation_normal": 0.0,
+                "avg_correlation_stress": 0.0,
+                "correlation_increase": 0.0,
+                "max_correlation_increases": {},
+            }
+
         normal_corr = self.returns.corr()
         stress_corr = self.returns[stress_mask].corr()
 
@@ -292,8 +304,9 @@ class StressTester:
         corr_diff = stress_corr - normal_corr
 
         # Average correlation in each regime
-        avg_normal_corr = normal_corr.values[np.triu_indices_from(normal_corr.values, k=1)].mean()
-        avg_stress_corr = stress_corr.values[np.triu_indices_from(stress_corr.values, k=1)].mean()
+        triu_idx = np.triu_indices_from(normal_corr.values, k=1)
+        avg_normal_corr = normal_corr.values[triu_idx].mean()
+        avg_stress_corr = stress_corr.values[triu_idx].mean()
 
         # Find pairs with largest correlation increase
         corr_diff_flat = corr_diff.where(np.triu(np.ones(corr_diff.shape), k=1).astype(bool))
