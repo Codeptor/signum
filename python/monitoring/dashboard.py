@@ -1452,6 +1452,7 @@ _API_ENDPOINTS = {
     "/api/drift": "Latest ML feature drift report (KS stat, PSI per feature)",
     "/api/bot": "Bot state (last trade date, shutdown reason, positions count)",
     "/api/logs": "Latest bot log lines (default 80, ?lines=N to customize)",
+    "/api/tca": "Transaction cost analysis: IS, VWAP slippage, fill rates, capacity",
     "/healthz": "Health check: bot liveness, alerting status, data freshness",
 }
 
@@ -1695,6 +1696,34 @@ def register_api_routes(app: dash.Dash) -> None:
                 "timestamp": datetime.now().isoformat(),
                 "n_lines": len(lines),
                 "log": lines,
+            }
+        )
+
+    # ── GET /api/tca — transaction cost analysis ──
+    @server.route("/api/tca")
+    def api_tca():
+        """Transaction cost analysis from persisted trade log."""
+        tca_path = _PROJECT_ROOT / "data" / "cache" / "tca_report.json"
+        if tca_path.exists():
+            try:
+                import json
+
+                with open(tca_path) as f:
+                    report = json.load(f)
+                return _json_response(
+                    {"timestamp": datetime.now().isoformat(), **report}
+                )
+            except Exception as exc:
+                return _json_response(
+                    {"error": f"Failed to load TCA report: {exc}"}, 500
+                )
+        return _json_response(
+            {
+                "timestamp": datetime.now().isoformat(),
+                "summary": {"n_trades": 0},
+                "by_symbol": [],
+                "recent_trades": [],
+                "note": "No TCA data yet. Runs after first rebalance cycle.",
             }
         )
 
