@@ -7,12 +7,18 @@ Integrates:
   - Alpha decay analysis (IC at 1d/5d/10d/20d horizons)
 """
 
+from __future__ import annotations
+
 import logging
+from typing import TYPE_CHECKING
 
 import mlflow
 import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
+
+if TYPE_CHECKING:
+    from python.alpha.ensemble import ModelEnsemble
 
 from python.alpha.features import (
     compute_alpha_features,
@@ -101,12 +107,17 @@ def _purged_walk_forward_cv(
     target_col: str = "target_5d",
     n_splits: int = 5,
     embargo_days: int = 22,
+    label_horizon: int = 5,
     use_ensemble: bool = True,
 ) -> dict:
     """Purged walk-forward cross-validation with SHAP and alpha decay.
 
     Replaces the simple date split with expanding-window walk-forward
-    validation. Each fold has a purge/embargo gap to prevent lookahead bias.
+    validation. Each fold has:
+      - Purge: removes training samples whose labels (forward returns)
+        overlap with the test window's time range.
+      - Embargo: additional buffer after purge to prevent serial correlation
+        leakage from autocorrelated features.
 
     Returns a dict with:
       - model: the final trained model (ensemble or LightGBM)
@@ -123,6 +134,7 @@ def _purged_walk_forward_cv(
     min_train_dates = int(n_dates * 0.4)  # At least 40% for first fold
     test_size = max(20, (n_dates - min_train_dates) // n_splits)
     embargo_offset = pd.tseries.offsets.BDay(embargo_days)
+    purge_offset = pd.tseries.offsets.BDay(label_horizon)
 
     fold_ics = []
     fold_shap_dfs = []
@@ -141,25 +153,46 @@ def _purged_walk_forward_cv(
             break
 
         train_end_date = dates[train_end_idx - 1]
-        # Apply embargo: skip embargo_days after train end
+
+        # PURGE: Remove training samples whose forward-return labels
+        # overlap with the test window. A sample at date T has a label
+        # computed from prices at T+1..T+horizon. If T+horizon falls
+        # within the test window, that sample is contaminated.
+        purge_cutoff = train_end_date - purge_offset
+        train_fold = labeled.loc[labeled.index.get_level_values(0) <= purge_cutoff]
+
+        # EMBARGO: additional buffer after purge for serial correlation
         embargo_date = train_end_date + embargo_offset
         test_start_date = dates[min(test_start_idx, n_dates - 1)]
         test_end_date = dates[min(test_end_idx - 1, n_dates - 1)]
 
-        # Ensure embargo is respected
+        # Ensure test starts after embargo
         if test_start_date < embargo_date:
-            # Find first date after embargo
             post_embargo = dates[dates >= embargo_date]
             if len(post_embargo) == 0:
                 logger.warning(f"Fold {fold}: no dates after embargo, skipping")
                 continue
             test_start_date = post_embargo[0]
+            # Extend test_end to maintain target test_size after embargo shift
+            test_end_candidates = dates[dates >= test_start_date]
+            if len(test_end_candidates) >= test_size:
+                test_end_date = test_end_candidates[test_size - 1]
+            elif len(test_end_candidates) > 0:
+                test_end_date = test_end_candidates[-1]
 
-        train_fold = labeled.loc[labeled.index.get_level_values(0) <= train_end_date]
         test_fold = labeled.loc[
             (labeled.index.get_level_values(0) >= test_start_date)
             & (labeled.index.get_level_values(0) <= test_end_date)
         ]
+
+        n_purged = (
+            len(labeled.loc[
+                (labeled.index.get_level_values(0) > purge_cutoff)
+                & (labeled.index.get_level_values(0) <= train_end_date)
+            ])
+        )
+        if n_purged > 0:
+            logger.info(f"Fold {fold}: purged {n_purged} rows with overlapping labels")
 
         if len(train_fold) < 100 or len(test_fold) < 10:
             logger.warning(
@@ -292,8 +325,13 @@ def _purged_walk_forward_cv(
     else:
         final_model.fit(labeled_w, target_col=target_col)
 
-    # Attach CV metrics to model
-    final_model.validation_ic = mean_ic
+    # Attach CV metrics to model.
+    # Prefer the model's own validation IC (from fit/meta-learner on held-out data)
+    # over the CV mean IC. Only fall back to CV mean if the model didn't compute one
+    # (e.g., insufficient val data for 3-way split, or single-model mode).
+    if getattr(final_model, "validation_ic", 0.0) < 1e-10:
+        final_model.validation_ic = mean_ic
+    final_model.cv_mean_ic = mean_ic  # Always store CV mean for reference
     final_model.cv_fold_ics = fold_ics
     final_model.shap_stability = shap_stability
     final_model.alpha_decay = alpha_decay
@@ -404,7 +442,7 @@ def run_training(
     data_path: str = "data/raw/sp500_ohlcv.parquet",
     use_ensemble: bool = True,
     n_cv_splits: int = 5,
-) -> "CrossSectionalModel":
+) -> "CrossSectionalModel | ModelEnsemble":
     """Full training pipeline with purged walk-forward CV.
 
     Pipeline:
