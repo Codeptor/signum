@@ -13,9 +13,11 @@ References:
   - Almgren & Chriss, 2001 — "Optimal Execution of Portfolio Transactions"
 """
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -271,3 +273,75 @@ class TransactionCostAnalyzer:
             result["recent_trades"] = []
 
         return result
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
+    def save(self, path: str | Path) -> None:
+        """Persist trade records to a JSON file for recovery across restarts.
+
+        Uses atomic write (tmp + rename) to prevent corruption on crash.
+        Keeps the last 2000 trades to avoid unbounded growth.
+        """
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Serialize trade records
+        records = []
+        for t in self._trades[-2000:]:  # Keep last 2000
+            records.append({
+                "symbol": t.symbol,
+                "side": t.side,
+                "order_qty": t.order_qty,
+                "fill_qty": t.fill_qty,
+                "fill_price": t.fill_price,
+                "decision_price": t.decision_price,
+                "timestamp": t.timestamp.isoformat() if isinstance(t.timestamp, datetime) else str(t.timestamp),
+                "commission": t.commission,
+                "vwap": t.vwap,
+            })
+
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(records, indent=2))
+        tmp.replace(path)  # Atomic rename
+        logger.info(f"TCA: saved {len(records)} trade records to {path}")
+
+    @classmethod
+    def load(cls, path: str | Path) -> "TransactionCostAnalyzer":
+        """Load trade records from a JSON file.
+
+        Returns a new TransactionCostAnalyzer with the loaded trades.
+        If the file is missing or corrupted, returns an empty analyzer.
+        """
+        path = Path(path)
+        if not path.exists():
+            logger.info(f"TCA: no saved trades at {path} — starting fresh")
+            return cls()
+
+        try:
+            records = json.loads(path.read_text())
+            trades = []
+            for r in records:
+                ts = r["timestamp"]
+                if isinstance(ts, str):
+                    try:
+                        ts = datetime.fromisoformat(ts)
+                    except ValueError:
+                        ts = datetime.now()
+                trades.append(TradeRecord(
+                    symbol=r["symbol"],
+                    side=r["side"],
+                    order_qty=r["order_qty"],
+                    fill_qty=r["fill_qty"],
+                    fill_price=r["fill_price"],
+                    decision_price=r["decision_price"],
+                    timestamp=ts,
+                    commission=r.get("commission", 0.0),
+                    vwap=r.get("vwap"),
+                ))
+            logger.info(f"TCA: loaded {len(trades)} trade records from {path}")
+            return cls(trades=trades)
+        except Exception as e:
+            logger.warning(f"TCA: failed to load from {path}: {e} — starting fresh")
+            return cls()
