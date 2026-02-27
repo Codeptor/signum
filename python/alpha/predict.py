@@ -15,13 +15,6 @@ from pathlib import Path
 import joblib
 import pandas as pd
 
-from python.data.config import (
-    MAX_OHLCV_AGE_DAYS,
-    OHLCV_CACHE_META_PATH,
-    OHLCV_CACHE_PATH,
-    STALE_DATA_EXPOSURE_MULT,
-)
-
 from python.alpha.features import (
     FEATURE_NEUTRAL_DEFAULTS,
     compute_alpha_features,
@@ -32,6 +25,12 @@ from python.alpha.features import (
 )
 from python.alpha.model import CrossSectionalModel
 from python.alpha.train import FEATURE_COLS
+from python.data.config import (
+    MAX_OHLCV_AGE_DAYS,
+    OHLCV_CACHE_META_PATH,
+    OHLCV_CACHE_PATH,
+    STALE_DATA_EXPOSURE_MULT,
+)
 from python.data.ingestion import (
     extract_close_prices,
     fetch_ohlcv,

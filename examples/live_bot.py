@@ -32,8 +32,8 @@ from python.brokers.base import BrokerOrder
 from python.data.config import RISK_ENGINE_CACHE_PATH, STALE_DATA_EXPOSURE_MULT
 from python.data.sectors import DEFAULT_MAX_SECTOR_WEIGHT, SECTOR_MAP
 from python.monitoring.alerting import AlertSeverity, send_alert, send_heartbeat, send_trade_summary
-from python.monitoring.telegram_cmd import start_telegram_command_handler
 from python.monitoring.regime import RegimeDetector, RegimeState, fetch_spy_drawdown, fetch_vix
+from python.monitoring.telegram_cmd import start_telegram_command_handler
 from python.portfolio.risk_manager import RiskLimits, RiskManager
 
 # --- Logging with rotation (Fix #36) ---
@@ -923,7 +923,8 @@ def run_trading_cycle(
                     sl_tp_qty = round(abs(total_pos.qty), 4) if total_pos else actual_qty
                 except Exception as e:
                     logger.warning(
-                        f"  get_position failed for {entry['symbol']}: {e} — using fill qty for SL/TP"
+                        f"  get_position failed for {entry['symbol']}: {e}"
+                        " — using fill qty for SL/TP"
                     )
                     sl_tp_qty = actual_qty
 

@@ -254,7 +254,10 @@ def _display_text(
     _print_header("Positions")
     if positions:
         equity = account["equity"] if account else 0.0
-        header = f"  {'Symbol':<8s} {'Qty':>8s} {'AvgEntry':>10s} {'Price':>10s} {'MktVal':>12s} {'PnL':>12s} {'PnL%':>8s} {'Weight':>8s}"
+        header = (
+            f"  {'Symbol':<8s} {'Qty':>8s} {'AvgEntry':>10s} {'Price':>10s}"
+            f" {'MktVal':>12s} {'PnL':>12s} {'PnL%':>8s} {'Weight':>8s}"
+        )
         print(header)
         print("  " + "-" * (len(header) - 2))
         for p in sorted(positions, key=lambda x: abs(x["market_value"]), reverse=True):
