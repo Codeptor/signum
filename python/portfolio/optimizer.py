@@ -83,19 +83,34 @@ class PortfolioOptimizer:
         n_obs, n_assets = self.returns.shape
         self._shrunk = False
         self._lw_estimator = None  # sklearn LedoitWolf estimator (if applied)
+        self._shrinkage_intensity = 0.0
         if shrink_covariance and n_assets > 2:
             try:
                 from sklearn.covariance import LedoitWolf
 
                 lw = LedoitWolf().fit(self.returns.values)
                 self._lw_estimator = lw
+                self._shrinkage_intensity = lw.shrinkage_
                 logger.info(
                     f"H-HRP: applied Ledoit-Wolf shrinkage "
                     f"(n_obs={n_obs}, n_assets={n_assets}, shrinkage={lw.shrinkage_:.3f})"
                 )
                 self._shrunk = True
             except Exception as e:
-                logger.warning(f"Ledoit-Wolf shrinkage failed: {e}")
+                # Fallback to standalone OAS estimator (no sklearn needed)
+                logger.info(f"sklearn LedoitWolf failed ({e}), using standalone OAS")
+                try:
+                    from python.portfolio.covariance import oas_shrinkage
+
+                    _, alpha = oas_shrinkage(self.returns.values)
+                    self._shrinkage_intensity = alpha
+                    self._shrunk = True
+                    logger.info(
+                        f"H-HRP: standalone OAS shrinkage={alpha:.3f} "
+                        f"(n_obs={n_obs}, n_assets={n_assets})"
+                    )
+                except Exception as e2:
+                    logger.warning(f"All covariance shrinkage failed: {e2}")
 
     def _prior_estimator(self):
         """Return an EmpiricalPrior with Ledoit-Wolf covariance if available (R3-O-1).
