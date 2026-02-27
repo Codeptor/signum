@@ -6,7 +6,12 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 from skfolio import RiskMeasure
-from skfolio.optimization import HierarchicalRiskParity, MeanRisk
+from skfolio.optimization import (
+    HierarchicalEqualRiskContribution,
+    HierarchicalRiskParity,
+    MeanRisk,
+    NestedClustersOptimization,
+)
 from skfolio.prior import BlackLitterman, EmpiricalPrior
 
 logger = logging.getLogger(__name__)
@@ -207,6 +212,54 @@ class PortfolioOptimizer:
             weights = _cap_weights(weights, self.max_weight)
         return weights
 
+    def herc(self) -> pd.Series:
+        """Hierarchical Equal Risk Contribution allocation.
+
+        HERC exploits the full dendrogram shape during recursive bisection,
+        distributing risk equally at each tree level rather than just at the
+        leaves (like HRP).
+        """
+        try:
+            model = HierarchicalEqualRiskContribution(
+                prior_estimator=self._prior_estimator(),
+            )
+            model.fit(self.returns)
+            weights = pd.Series(model.weights_, index=self.tickers, name="herc_weights")
+        except Exception as e:
+            logger.error(f"HERC optimization failed: {e}. Falling back to equal weight.")
+            weights = pd.Series(
+                np.ones(len(self.tickers)) / len(self.tickers),
+                index=self.tickers,
+                name="herc_weights",
+            )
+        if self.max_weight is not None:
+            weights = _cap_weights(weights, self.max_weight)
+        return weights
+
+    def nco(self) -> pd.Series:
+        """Nested Clusters Optimization.
+
+        NCO clusters assets first, optimizes within each cluster, then
+        optimizes across cluster portfolios — reducing estimation error
+        from the full covariance matrix.
+        """
+        try:
+            model = NestedClustersOptimization(
+                prior_estimator=self._prior_estimator(),
+            )
+            model.fit(self.returns)
+            weights = pd.Series(model.weights_, index=self.tickers, name="nco_weights")
+        except Exception as e:
+            logger.error(f"NCO optimization failed: {e}. Falling back to equal weight.")
+            weights = pd.Series(
+                np.ones(len(self.tickers)) / len(self.tickers),
+                index=self.tickers,
+                name="nco_weights",
+            )
+        if self.max_weight is not None:
+            weights = _cap_weights(weights, self.max_weight)
+        return weights
+
     def risk_parity(self) -> pd.Series:
         """Equal risk contribution allocation via HRP with variance risk measure."""
         try:
@@ -241,12 +294,15 @@ class PortfolioOptimizer:
             Optimized weights (or current weights if turnover is too low).
         """
         # Compute new target weights
-        if method == "hrp":
-            new_weights = self.hrp()
-        elif method == "min_cvar":
-            new_weights = self.min_cvar()
-        elif method == "risk_parity":
-            new_weights = self.risk_parity()
+        dispatch = {
+            "hrp": self.hrp,
+            "min_cvar": self.min_cvar,
+            "risk_parity": self.risk_parity,
+            "herc": self.herc,
+            "nco": self.nco,
+        }
+        if method in dispatch:
+            new_weights = dispatch[method]()
         else:
             logger.warning(f"Unknown method '{method}' for turnover penalty, using HRP")
             new_weights = self.hrp()
@@ -280,7 +336,12 @@ class PortfolioOptimizer:
         view_confidences: pd.Series | None = None,
     ) -> pd.DataFrame:
         """Run all optimization strategies and return weights comparison."""
-        results = {"hrp": self.hrp(), "min_cvar": self.min_cvar()}
+        results = {
+            "hrp": self.hrp(),
+            "min_cvar": self.min_cvar(),
+            "herc": self.herc(),
+            "nco": self.nco(),
+        }
         if views is not None and view_confidences is not None:
             results["black_litterman"] = self.black_litterman(views, view_confidences)
         results["risk_parity"] = self.risk_parity()
