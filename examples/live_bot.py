@@ -32,6 +32,7 @@ from python.brokers.base import BrokerOrder
 from python.data.config import RISK_ENGINE_CACHE_PATH, STALE_DATA_EXPOSURE_MULT
 from python.data.sectors import DEFAULT_MAX_SECTOR_WEIGHT, SECTOR_MAP
 from python.monitoring.alerting import AlertSeverity, send_alert, send_heartbeat, send_trade_summary
+from python.monitoring.telegram_cmd import start_telegram_command_handler
 from python.monitoring.regime import RegimeDetector, RegimeState, fetch_spy_drawdown, fetch_vix
 from python.portfolio.risk_manager import RiskLimits, RiskManager
 
@@ -1130,6 +1131,10 @@ def main():
         f"Rebalance: {REBALANCE_FREQUENCY} (day={REBALANCE_DAY}).",
         AlertSeverity.INFO,
     )
+
+    # Start Telegram command handler (background polling thread)
+    # Allows querying bot state via /status, /positions, /equity, etc.
+    start_telegram_command_handler()
 
     # --- SIGTERM handler (H4): persist state on container/systemd kill ---
     # C3 fix: Save comprehensive state including positions and trade tracking,
