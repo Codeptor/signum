@@ -1,6 +1,7 @@
 """Tests for python.monitoring.alerting — multi-channel alert delivery.
 
 Covers:
+  - Telegram Bot API delivery
   - Email sending (SMTP) with mocked smtplib
   - Webhook delivery with mocked urllib
   - Rate limiting behavior
@@ -53,6 +54,13 @@ def _webhook_configured(monkeypatch):
 
 
 @pytest.fixture()
+def _telegram_configured(monkeypatch):
+    """Configure Telegram bot for tests."""
+    monkeypatch.setattr("python.monitoring.alerting.TELEGRAM_BOT_TOKEN", "123456:ABC-DEF")
+    monkeypatch.setattr("python.monitoring.alerting.TELEGRAM_CHAT_ID", "987654321")
+
+
+@pytest.fixture()
 def _nothing_configured(monkeypatch):
     """Ensure no alerting channels are configured."""
     monkeypatch.setattr("python.monitoring.alerting.SMTP_HOST", "")
@@ -60,6 +68,8 @@ def _nothing_configured(monkeypatch):
     monkeypatch.setattr("python.monitoring.alerting.SMTP_PASSWORD", "")
     monkeypatch.setattr("python.monitoring.alerting.ALERT_EMAIL_TO", "")
     monkeypatch.setattr("python.monitoring.alerting.ALERT_WEBHOOK_URL", "")
+    monkeypatch.setattr("python.monitoring.alerting.TELEGRAM_BOT_TOKEN", "")
+    monkeypatch.setattr("python.monitoring.alerting.TELEGRAM_CHAT_ID", "")
 
 
 # ===========================================================================
@@ -472,3 +482,121 @@ class TestSendGridTransport:
         ):
             # Must not raise
             _send_email_sendgrid("test", "body")
+
+
+# ===========================================================================
+# Telegram transport
+# ===========================================================================
+
+
+class TestTelegramTransport:
+    def test_telegram_called_when_configured(self, _telegram_configured):
+        """Telegram sendMessage API is called when token and chat_id are set."""
+        from python.monitoring.alerting import AlertSeverity, _send_telegram
+
+        with patch("python.monitoring.alerting.urllib.request.urlopen") as mock_urlopen:
+            mock_resp = MagicMock(status=200)
+            mock_urlopen.return_value = mock_resp
+            _send_telegram("test message", AlertSeverity.INFO)
+            assert mock_urlopen.call_count == 1
+            # Verify the URL hits Telegram API
+            call_args = mock_urlopen.call_args
+            request_obj = call_args[0][0]
+            assert "api.telegram.org" in request_obj.full_url
+            assert "sendMessage" in request_obj.full_url
+            # Verify payload
+            import json
+
+            payload = json.loads(request_obj.data.decode("utf-8"))
+            assert payload["chat_id"] == "987654321"
+            assert "Signum INFO" in payload["text"]
+            assert payload["parse_mode"] == "MarkdownV2"
+
+    def test_telegram_not_called_when_unconfigured(self, _nothing_configured):
+        """Telegram is skipped silently when not configured."""
+        from python.monitoring.alerting import _send_telegram
+
+        with patch("python.monitoring.alerting.urllib.request.urlopen") as mock_urlopen:
+            _send_telegram("test message")
+            mock_urlopen.assert_not_called()
+
+    def test_telegram_failure_swallowed(self, _telegram_configured):
+        """Telegram API errors must never propagate."""
+        from python.monitoring.alerting import _send_telegram
+
+        with patch(
+            "python.monitoring.alerting.urllib.request.urlopen",
+            side_effect=Exception("Telegram down"),
+        ):
+            # Must not raise
+            _send_telegram("test message")
+
+    def test_telegram_fallback_to_plain_text(self, _telegram_configured):
+        """When MarkdownV2 fails, fallback to plain text."""
+        from python.monitoring.alerting import AlertSeverity, _send_telegram
+
+        call_count = 0
+
+        def side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise Exception("Bad Request: can't parse entities")
+            return MagicMock(status=200)
+
+        with patch(
+            "python.monitoring.alerting.urllib.request.urlopen",
+            side_effect=side_effect,
+        ):
+            _send_telegram("test *with* special [chars]", AlertSeverity.WARNING)
+            # Should have been called twice: first MarkdownV2, then plain
+            assert call_count == 2
+
+    def test_telegram_fires_from_send_alert(self, _telegram_configured):
+        """send_alert dispatches to Telegram when configured."""
+        from python.monitoring.alerting import AlertSeverity, send_alert
+
+        with patch("python.monitoring.alerting._send_telegram") as mock_tg:
+            send_alert("test from send_alert", AlertSeverity.WARNING)
+            mock_tg.assert_called_once_with("test from send_alert", AlertSeverity.WARNING)
+
+    def test_telegram_severity_labels(self, _telegram_configured):
+        """Each severity level produces the correct label in Telegram message."""
+        from python.monitoring.alerting import AlertSeverity, _send_telegram
+
+        for sev, label in [
+            (AlertSeverity.INFO, "INFO"),
+            (AlertSeverity.WARNING, "WARNING"),
+            (AlertSeverity.CRITICAL, "CRITICAL"),
+        ]:
+            with patch("python.monitoring.alerting.urllib.request.urlopen") as mock_urlopen:
+                mock_urlopen.return_value = MagicMock(status=200)
+                _send_telegram("test", sev)
+                import json
+
+                request_obj = mock_urlopen.call_args[0][0]
+                payload = json.loads(request_obj.data.decode("utf-8"))
+                assert f"Signum {label}" in payload["text"]
+
+    def test_escape_telegram_md(self):
+        """Special characters are properly escaped for MarkdownV2."""
+        from python.monitoring.alerting import _escape_telegram_md
+
+        assert _escape_telegram_md("hello_world") == "hello\\_world"
+        assert _escape_telegram_md("*bold*") == "\\*bold\\*"
+        assert _escape_telegram_md("price: $100.50") == "price: $100\\.50"
+        assert _escape_telegram_md("no specials") == "no specials"
+
+    def test_telegram_in_alerting_status(self, _telegram_configured):
+        """get_alerting_status includes Telegram info."""
+        from python.monitoring.alerting import get_alerting_status
+
+        status = get_alerting_status()
+        assert status["telegram_configured"] is True
+
+    def test_telegram_not_in_alerting_status_when_unconfigured(self, _nothing_configured):
+        """get_alerting_status reports Telegram as not configured."""
+        from python.monitoring.alerting import get_alerting_status
+
+        status = get_alerting_status()
+        assert status["telegram_configured"] is False
