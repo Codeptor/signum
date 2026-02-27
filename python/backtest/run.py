@@ -165,6 +165,7 @@ def run_backtest(
     slippage_bps: float = 5.0,  # 5 bps slippage estimate (NEW)
     enable_risk_manager: bool = True,
     risk_limits: dict | None = None,
+    n_strategy_trials: int = 20,
 ) -> dict:
     """Walk-forward backtest with ML alpha, portfolio optimization, and transaction costs.
 
@@ -447,7 +448,7 @@ def run_backtest(
         "avg_turnover": avg_turnover,
         "total_cost_bps": transaction_cost_bps,
         "deflated_sharpe": deflated_sharpe_ratio(
-            sharpe, n_trials=n_splits, n_observations=len(portfolio_returns)
+            sharpe, n_trials=n_strategy_trials, n_observations=len(portfolio_returns)
         ),
         "optimizer_method": optimizer_method,
         "n_folds": n_splits,
