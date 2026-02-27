@@ -138,6 +138,7 @@ def _cmd_help() -> str:
         "/regime     — Market regime (VIX, drawdown)",
         "/health     — System health check",
         "/trades     — Recent trade info",
+        "/tca        — Execution quality (IS, slippage)",
         "/logs       — Last 20 log lines",
         "/help       — This message",
     ]
@@ -398,6 +399,41 @@ def _cmd_analytics() -> str:
 
     if report.omega_ratio is not None:
         lines.append(f"Omega: {report.omega_ratio:.2f}")
+
+    return "\n".join(lines)
+
+
+@_cmd("/tca")
+def _cmd_tca() -> str:
+    """Transaction cost analysis from persisted TCA data."""
+    import json as _json
+    from pathlib import Path
+
+    tca_path = Path("data/cache/tca_report.json")
+    if not tca_path.exists():
+        return "No TCA data available yet. Trade first, then check back."
+
+    try:
+        data = _json.loads(tca_path.read_text())
+    except Exception:
+        return "Could not read TCA data."
+
+    summary = data.get("summary", {})
+    if not summary or summary.get("n_trades", 0) == 0:
+        return "No trades recorded for TCA analysis."
+
+    lines = ["TCA — Execution Quality\n"]
+    lines.append(f"Trades: {summary.get('n_trades', 0)}")
+    lines.append(f"Total volume: ${summary.get('total_volume', 0):,.0f}")
+    lines.append(f"Mean IS: {summary.get('mean_is_bps', 0):.1f} bps")
+    lines.append(f"Median IS: {summary.get('median_is_bps', 0):.1f} bps")
+
+    vwap_slip = summary.get("mean_vwap_slip_bps")
+    if vwap_slip is not None:
+        lines.append(f"VWAP slip: {vwap_slip:.1f} bps")
+
+    lines.append(f"Fill rate: {summary.get('mean_fill_rate', 0):.1%}")
+    lines.append(f"Total cost: {summary.get('mean_total_cost_bps', 0):.1f} bps")
 
     return "\n".join(lines)
 

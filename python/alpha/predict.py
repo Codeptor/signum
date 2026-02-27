@@ -463,11 +463,17 @@ def train_model(
     training_tickers: list[str] | None = None,
     data_path: str | None = None,
     force_retrain: bool = False,
+    use_ensemble: bool = True,
 ) -> CrossSectionalModel:
-    """Train a fresh LightGBM model on historical S&P 500 data.
+    """Train an ensemble model on historical S&P 500 data with purged CV.
 
-    Uses either a cached parquet file or fetches fresh data.
-    Returns a fitted CrossSectionalModel.
+    Pipeline:
+      1. Load/fetch data, compute features and targets
+      2. Run purged walk-forward CV (5 folds, 22-day embargo)
+      3. Compute SHAP importance per fold + cross-fold stability
+      4. Compute alpha decay profile (IC at 1d/5d/10d/20d)
+      5. Train final ensemble (LightGBM + CatBoost + RF + Ridge meta-learner)
+      6. Log all metrics to MLflow
 
     If a model was already trained today, returns the cached version
     unless force_retrain=True.
@@ -480,6 +486,7 @@ def train_model(
             return cached_model
 
     from python.alpha.features import compute_forward_returns, compute_residual_target
+    from python.alpha.train import _purged_walk_forward_cv
 
     cached = Path(data_path) if data_path else Path("data/raw/sp500_ohlcv.parquet")
 
@@ -517,18 +524,12 @@ def train_model(
             "Use a point-in-time membership table for unbiased backtests."
         )
 
-        # Train on the full S&P 500 universe.  Previous versions sampled 100
-        # tickers for speed, but this causes distribution mismatch at inference
-        # time when the model scores all ~500 stocks.  LightGBM handles 500
-        # tickers × 2yr daily data (~250k rows) in under a minute.
         all_tickers = fetch_sp500_tickers()
         tickers = training_tickers or all_tickers
         raw = fetch_ohlcv(tickers, period=TRAINING_LOOKBACK)
         long = reshape_ohlcv_wide_to_long(raw)
 
-    # R3-P-2 fix: compute winsorize bounds from training data and save them.
-    # First pass: compute features WITHOUT winsorize bounds (raw distributions).
-    # Bounds will be computed from the training split only to prevent leakage.
+    # Compute features and targets
     featured = compute_alpha_features(long)
     featured = compute_cross_sectional_features(featured)
 
@@ -553,78 +554,52 @@ def train_model(
 
     labeled = labeled.dropna(subset=available_cols + ["target_5d"])
 
-    # Date-based train/val split: reserve last 20% of dates for validation
-    # with 5-day embargo to prevent target leakage (same approach as train.py)
-    dates = labeled.index.get_level_values(0).unique().sort_values()
-    split_date = dates[int(len(dates) * 0.8)]
-    # Embargo must cover the longest feature lookback window to prevent
-    # information leakage from features that straddle the train/val boundary.
-    # Feature set includes 20-day returns, 20-day vol, 20-day Bollinger, and
-    # 60-day moving averages.  22 business days (~1 calendar month) provides
-    # a safe margin above the 20-day features while being conservative enough
-    # not to waste too much data.  (The 60-day MA creates backward dependence
-    # only, not forward leakage, so 22 days is sufficient.)
-    embargo_offset = pd.tseries.offsets.BDay(22)
-    embargo_date = split_date + embargo_offset
-
-    train_data = labeled.loc[labeled.index.get_level_values(0) <= split_date]
-    val_data = labeled.loc[labeled.index.get_level_values(0) >= embargo_date]
-
-    # C-WINS-FIX: compute winsorize bounds from TRAINING split only.
-    # Previously bounds were computed from the full dataset (train + val),
-    # which leaks validation-set statistics into training features.
-    bounds = compute_winsorize_bounds(train_data)
-    save_winsorize_bounds(bounds)
+    # Run purged walk-forward CV with ensemble, SHAP, and alpha decay
     logger.info(
-        f"Saved winsorize bounds ({len(bounds)} cols) from training split only "
-        f"(no val leakage)"
+        f"Running purged walk-forward CV "
+        f"({'ensemble' if use_ensemble else 'LightGBM'}, 5 folds, 22-day embargo)..."
+    )
+    cv_result = _purged_walk_forward_cv(
+        labeled,
+        feature_cols=available_cols,
+        n_splits=5,
+        use_ensemble=use_ensemble,
     )
 
-    # Re-winsorize both splits using training-only bounds
-    train_data = winsorize(train_data, bounds=bounds)
-    if len(val_data) > 0:
-        val_data = winsorize(val_data, bounds=bounds)
-
-    logger.info(
-        f"Training on {len(train_data)} samples (up to {split_date.date()}), "
-        f"validating on {len(val_data)} samples (from {embargo_date.date()}, "
-        f"embargo=22 business days)"
-    )
-
-    model = CrossSectionalModel(model_type="lightgbm", feature_cols=available_cols)
-    ic = None
-
-    if len(val_data) > 0:
-        model.fit(train_data, target_col="target_5d", val_df=val_data)
-        # Log validation IC
-        val_preds = model.predict(val_data)
-        # Use Spearman rank IC (not Pearson) — standard for cross-sectional
-        # equity models, consistent with ensemble's _safe_ic and robust to outliers.
-        from scipy.stats import spearmanr
-
-        ic_val, _ = spearmanr(val_preds, val_data["target_5d"].values)
-        ic = float(ic_val) if not np.isnan(ic_val) else 0.0
-        logger.info(f"Live model validation IC: {ic:.4f}")
-    else:
-        logger.warning("No validation data available — training without early stopping")
-        model.fit(train_data, target_col="target_5d")
-
-    # Attach IC to model so callers can gate on quality
-    model.validation_ic = ic  # type: ignore[attr-defined]
+    model = cv_result["model"]
+    fold_ics = cv_result["fold_ics"]
+    mean_ic = cv_result["mean_ic"]
+    std_ic = cv_result["std_ic"]
 
     # --- MLflow tracking (best-effort: never crash training) ---
     try:
         import mlflow
 
-        with mlflow.start_run(run_name="live_lgbm_alpha"):
-            mlflow.log_params(model.params)
-            mlflow.log_metric("train_size", len(train_data))
-            mlflow.log_metric("val_size", len(val_data))
+        run_name = "live_ensemble_purged_cv" if use_ensemble else "live_lgbm_purged_cv"
+        with mlflow.start_run(run_name=run_name):
+            mlflow.log_params(model.params if hasattr(model, "params") else {})
+            mlflow.log_metric("cv_mean_ic", mean_ic)
+            mlflow.log_metric("cv_std_ic", std_ic)
+            mlflow.log_metric("cv_n_folds", len(fold_ics))
             mlflow.log_metric("feature_count", len(available_cols))
-            if ic is not None:
-                mlflow.log_metric("validation_ic", float(ic))
             mlflow.log_param("trained_date", date.today().isoformat())
             mlflow.log_param("feature_columns", json.dumps(available_cols))
+            mlflow.log_param("training_mode", "ensemble" if use_ensemble else "lightgbm")
+
+            for i, ic in enumerate(fold_ics):
+                mlflow.log_metric(f"fold_{i}_ic", ic)
+
+            # SHAP stability
+            shap_stability = cv_result.get("shap_stability", {})
+            if shap_stability:
+                mlflow.log_metric("shap_top5_overlap", shap_stability.get("top_k_overlap", 0))
+                mlflow.log_metric("shap_rank_corr", shap_stability.get("rank_correlation", 0))
+
+            # Alpha decay
+            alpha_decay = cv_result.get("alpha_decay", {})
+            for horizon, info in alpha_decay.items():
+                if isinstance(horizon, int):
+                    mlflow.log_metric(f"ic_{horizon}d", info["ic"])
 
             # Log feature importance as artifact
             try:
@@ -638,8 +613,7 @@ def train_model(
             except Exception as e:
                 logger.debug(f"Could not log feature importance artifact: {e}")
 
-            # Log winsorize bounds alongside the model so rollbacks keep
-            # bounds in sync with the model version that produced them.
+            # Log winsorize bounds
             try:
                 bounds_path = Path("data/models/winsorize_bounds.json")
                 if bounds_path.exists():
@@ -647,13 +621,13 @@ def train_model(
             except Exception as e:
                 logger.debug(f"Could not log winsorize bounds artifact: {e}")
 
-        logger.info("MLflow run logged successfully for live_lgbm_alpha")
+        logger.info(f"MLflow run logged ({run_name})")
     except Exception as e:
         logger.warning(f"MLflow tracking failed (training unaffected): {e}")
 
     # Cache the trained model and save feature reference for drift detection
     _save_model_cache(model)
-    _save_feature_reference(train_data, available_cols)
+    _save_feature_reference(labeled, available_cols)
 
     return model
 

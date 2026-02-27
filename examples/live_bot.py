@@ -32,9 +32,11 @@ from python.brokers.base import BrokerOrder
 from python.data.config import RISK_ENGINE_CACHE_PATH, STALE_DATA_EXPOSURE_MULT
 from python.data.sectors import DEFAULT_MAX_SECTOR_WEIGHT, SECTOR_MAP
 from python.monitoring.alerting import AlertSeverity, send_alert, send_heartbeat, send_trade_summary
+from python.monitoring.hmm_regime import HMMRegimeDetector, HMMRegimeState
 from python.monitoring.regime import RegimeDetector, RegimeState, fetch_spy_drawdown, fetch_vix
 from python.monitoring.telegram_cmd import start_telegram_command_handler
 from python.portfolio.risk_manager import RiskLimits, RiskManager
+from python.portfolio.tca import TradeRecord, TransactionCostAnalyzer
 
 # --- Logging with rotation (Fix #36) ---
 # JSON logging: set LOG_FORMAT=json for structured output (machine-parseable).
@@ -612,6 +614,7 @@ def run_trading_cycle(
     bridge: ExecutionBridge,
     regime_detector: RegimeDetector | None = None,
     regime_state: RegimeState | None = None,
+    tca_analyzer: TransactionCostAnalyzer | None = None,
 ) -> bool:
     """The core daily trading logic. Returns True if trades were executed."""
     logger.info("=" * 60)
@@ -1068,6 +1071,33 @@ def run_trading_cycle(
         f"out of {len(submitted_orders)} submitted."
     )
 
+    # Record trades for TCA analysis
+    if tca_analyzer is not None:
+        for entry in submitted_orders:
+            try:
+                order_info = broker.get_order(entry["order_id"])
+                if order_info and order_info.filled_avg_price:
+                    decision_price = prices.get(entry["symbol"], order_info.filled_avg_price)
+                    tca_analyzer.add_trade(TradeRecord(
+                        symbol=entry["symbol"],
+                        side=entry["side"].upper(),
+                        order_qty=entry["qty"],
+                        fill_qty=float(order_info.filled_qty or 0),
+                        fill_price=float(order_info.filled_avg_price),
+                        decision_price=float(decision_price),
+                        timestamp=datetime.now(tz=ZoneInfo("America/New_York")),
+                    ))
+            except Exception as e:
+                logger.debug(f"TCA recording failed for {entry['symbol']}: {e}")
+
+        if tca_analyzer.n_trades > 0:
+            tca_summary = tca_analyzer.summary()
+            logger.info(
+                f"TCA: {tca_summary.get('n_trades', 0)} trades, "
+                f"mean IS={tca_summary.get('mean_is_bps', 0):.1f}bps, "
+                f"mean fill rate={tca_summary.get('mean_fill_rate', 0):.1%}"
+            )
+
     # Send trade summary alert (email + webhook)
     account = broker.get_account()
     send_trade_summary(
@@ -1205,8 +1235,25 @@ def main():
     )
     risk_manager = RiskManager(limits=risk_limits, sector_map=SECTOR_MAP)
 
-    # Initialize regime detector for market condition monitoring (Phase 2)
+    # Initialize regime detectors — HMM (primary) with threshold fallback
     regime_detector = RegimeDetector()
+    hmm_detector: HMMRegimeDetector | None = None
+    try:
+        import yfinance as yf
+
+        spy = yf.download("SPY", period="2y", interval="1d", progress=False)
+        if spy is not None and len(spy) > 60:
+            spy_returns = spy["Close"].pct_change().dropna()
+            hmm_detector = HMMRegimeDetector()
+            hmm_detector.fit(spy_returns)
+            logger.info(f"HMM regime detector fitted on {len(spy_returns)} days of SPY returns")
+        else:
+            logger.warning("Insufficient SPY data for HMM — using threshold fallback")
+    except Exception as e:
+        logger.warning(f"HMM regime detector init failed: {e} — using threshold fallback")
+
+    # Initialize TCA analyzer for execution quality tracking
+    tca_analyzer = TransactionCostAnalyzer()
 
     # Initialize risk engine with current positions' historical data
     _initialize_risk_engine(broker, risk_manager)
@@ -1336,12 +1383,50 @@ def main():
                     time.sleep(60 * 30)
                     continue
 
-                # Check market regime before trading (Phase 2: Risk Management)
+                # Check market regime — HMM (primary) with threshold fallback
                 vix = fetch_vix()
                 spy_dd = fetch_spy_drawdown()
+
+                # Try HMM regime detection first (probabilistic, adaptive)
+                hmm_state: HMMRegimeState | None = None
+                if hmm_detector is not None:
+                    try:
+                        import yfinance as yf
+
+                        spy_recent = yf.download(
+                            "SPY", period="3mo", interval="1d", progress=False
+                        )
+                        if spy_recent is not None and len(spy_recent) > 25:
+                            spy_rets = spy_recent["Close"].pct_change().dropna()
+                            hmm_state = hmm_detector.predict_regime(spy_rets)
+                            logger.info(f"HMM regime: {hmm_state.message}")
+                    except Exception as e:
+                        logger.warning(f"HMM prediction failed: {e}")
+
                 if vix is not None and spy_dd is not None:
-                    regime_state = regime_detector.get_regime_state(vix, spy_dd)
-                    logger.info(f"Market regime: {regime_state.message}")
+                    # Threshold-based regime (always computed for comparison/fallback)
+                    threshold_state = regime_detector.get_regime_state(vix, spy_dd)
+
+                    # Use HMM regime if available, otherwise threshold
+                    if hmm_state is not None:
+                        # Map HMM to RegimeState for compatibility with run_trading_cycle
+                        hmm_regime_map = {"low_vol": "normal", "normal": "caution", "high_vol": "halt"}
+                        mapped_regime = hmm_regime_map.get(hmm_state.regime, "caution")
+                        regime_state = RegimeState(
+                            regime=mapped_regime,
+                            vix=vix,
+                            spy_drawdown=spy_dd,
+                            exposure_multiplier=hmm_state.exposure_multiplier,
+                            message=f"HMM: {hmm_state.message} (threshold: {threshold_state.regime})",
+                        )
+                        logger.info(
+                            f"Using HMM regime: {hmm_state.regime} "
+                            f"(exposure={hmm_state.exposure_multiplier:.0%}), "
+                            f"threshold would say: {threshold_state.regime}"
+                        )
+                    else:
+                        regime_state = threshold_state
+                        logger.info(f"Market regime (threshold): {regime_state.message}")
 
                     if regime_state.regime == "halt":
                         logger.warning("Market regime HALT — liquidating all positions.")
@@ -1350,13 +1435,11 @@ def main():
                             f"SPY drawdown={spy_dd:.1%}. Liquidating all positions.",
                             AlertSeverity.CRITICAL,
                         )
-                        # H1 fix: Actually close positions instead of just logging
                         _liquidate_all_positions(broker)
                         time.sleep(60 * 60)  # Re-check in 1 hour
                         continue
                 else:
-                    # H2 fix: Fail-closed — assume caution regime when data unavailable
-                    # instead of proceeding with full exposure (fail-open was dangerous)
+                    # Fail-closed — assume caution regime when data unavailable
                     logger.warning(
                         "Could not fetch regime data (VIX/SPY). "
                         "Fail-closed: assuming CAUTION regime (50% exposure)."
@@ -1376,6 +1459,7 @@ def main():
                     bridge,
                     regime_detector=regime_detector,
                     regime_state=regime_state,
+                    tca_analyzer=tca_analyzer,
                 )
 
                 # Persist state after trading cycle (P1-6)
