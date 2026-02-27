@@ -950,6 +950,20 @@ def get_ml_weights(
     global _last_drift_report
     _last_drift_report = drift_report
 
+    # Persist to disk so the dashboard (separate process) can read it
+    drift_path = _PROJECT_ROOT / "data" / "cache" / "drift_report.json"
+    try:
+        drift_path.parent.mkdir(parents=True, exist_ok=True)
+        serializable = {}
+        for feat, info in (drift_report or {}).items():
+            serializable[feat] = {
+                k: float(v) if isinstance(v, (int, float, np.floating)) else v
+                for k, v in (info if isinstance(info, dict) else {"value": info}).items()
+            }
+        drift_path.write_text(json.dumps(serializable, indent=2))
+    except Exception as e:
+        logger.debug(f"Failed to persist drift report: {e}")
+
     # Log drift metrics to MLflow (best-effort)
     if drift_report:
         try:

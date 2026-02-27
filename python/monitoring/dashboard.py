@@ -1616,9 +1616,11 @@ def register_api_routes(app: dash.Dash) -> None:
     @server.route("/api/drift")
     def api_drift():
         try:
-            from python.alpha.predict import _last_drift_report
-
-            if _last_drift_report is None:
+            # Read from disk (the ML pipeline writes drift_report.json)
+            # instead of importing the module-level var (which is always
+            # None in a separate dashboard process).
+            drift_path = Path(__file__).resolve().parent.parent.parent / "data" / "cache" / "drift_report.json"
+            if not drift_path.exists():
                 return _json_response(
                     {
                         "timestamp": datetime.now().isoformat(),
@@ -1627,13 +1629,7 @@ def register_api_routes(app: dash.Dash) -> None:
                     }
                 )
 
-            # Serialize the drift report
-            clean_report = {}
-            for feature, info in _last_drift_report.items():
-                clean_report[feature] = {
-                    k: _safe_float(v) if isinstance(v, (int, float, np.floating)) else v
-                    for k, v in (info if isinstance(info, dict) else {"value": info}).items()
-                }
+            clean_report = json.loads(drift_path.read_text())
 
             n_drifted = sum(
                 1
@@ -1649,12 +1645,12 @@ def register_api_routes(app: dash.Dash) -> None:
                     "features": clean_report,
                 }
             )
-        except ImportError:
+        except Exception:
             return _json_response(
                 {
                     "timestamp": datetime.now().isoformat(),
                     "drift_report": None,
-                    "message": "Drift module not available.",
+                    "message": "Failed to read drift report.",
                 }
             )
 
