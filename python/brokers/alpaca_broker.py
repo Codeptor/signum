@@ -467,7 +467,8 @@ class AlpacaBroker(BaseBroker):
         import yfinance as yf
 
         ticker = yf.Ticker(symbol)
-        price = ticker.fast_info.get("lastPrice")
+        # yfinance 0.2.x uses snake_case attributes on fast_info
+        price = getattr(ticker.fast_info, "last_price", None)
         if price and price > 0:
             logger.info(f"yfinance price for {symbol}: ${price:.2f}")
             return float(price)
