@@ -61,22 +61,26 @@ class TestRiskLimits:
     """Test RiskLimits dataclass."""
 
     def test_default_limits(self):
-        """Test default limit values."""
+        """Test default limit values match production/documented values."""
         limits = RiskLimits()
 
-        assert limits.max_position_weight == 0.25
-        assert limits.max_daily_trades == 20
+        assert limits.max_position_weight == 0.30
+        assert limits.max_sector_weight == 0.25
+        assert limits.max_drawdown_limit == 0.15
+        assert limits.max_daily_trades == 50
+        assert limits.min_sharpe_ratio == -0.5
+        assert limits.max_portfolio_var_95 == 0.06
         assert limits.min_risk_reward_ratio == 2.0
 
     def test_custom_limits(self):
         """Test custom limit configuration."""
         limits = RiskLimits(
-            max_position_weight=0.30,
-            max_daily_trades=20,
+            max_position_weight=0.20,
+            max_daily_trades=30,
         )
 
-        assert limits.max_position_weight == 0.30
-        assert limits.max_daily_trades == 20
+        assert limits.max_position_weight == 0.20
+        assert limits.max_daily_trades == 30
 
 
 class TestRiskCheck:
@@ -114,7 +118,7 @@ class TestRiskManagerInitialization:
         manager = RiskManager()
 
         assert isinstance(manager.limits, RiskLimits)
-        assert manager.limits.max_position_weight == 0.25
+        assert manager.limits.max_position_weight == 0.30
 
 
 class TestTradeValidation:

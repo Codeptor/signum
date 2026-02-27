@@ -228,7 +228,7 @@ class TestFeatureReduction:
     def test_reduced_feature_set_size(self):
         from python.alpha.train import FEATURE_COLS
 
-        assert len(FEATURE_COLS) == 8
+        assert len(FEATURE_COLS) == 7
 
     def test_reduced_feature_set_contents(self):
         from python.alpha.train import FEATURE_COLS
@@ -241,7 +241,6 @@ class TestFeatureReduction:
             "vol_20d",
             "volume_ratio",
             "cs_ret_rank_5d",
-            "vix",
         }
         assert set(FEATURE_COLS) == expected
 

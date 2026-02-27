@@ -79,7 +79,7 @@ class RegimeAnalysis:
     def worst_drawdown(self) -> float:
         if not self.results:
             return 0.0
-        return float(min(r.max_drawdown for r in self.results.values()))
+        return float(max(r.max_drawdown for r in self.results.values()))
 
     def summary(self) -> pd.DataFrame:
         """Return a summary DataFrame of all regime results."""
@@ -155,8 +155,8 @@ def compute_regime_metrics(
     # Max drawdown
     cumulative = (1 + returns).cumprod()
     running_max = cumulative.cummax()
-    drawdowns = (cumulative - running_max) / running_max
-    max_dd = float(drawdowns.min())
+    drawdowns = (running_max - cumulative) / running_max
+    max_dd = float(drawdowns.max())
 
     return RegimeResult(
         regime=regime,

@@ -13,6 +13,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 import joblib
+import numpy as np
 import pandas as pd
 
 from python.alpha.features import (
@@ -22,6 +23,7 @@ from python.alpha.features import (
     compute_winsorize_bounds,
     load_winsorize_bounds,
     save_winsorize_bounds,
+    winsorize,
 )
 from python.alpha.model import CrossSectionalModel
 from python.alpha.train import FEATURE_COLS
@@ -523,8 +525,8 @@ def train_model(
         long = reshape_ohlcv_wide_to_long(raw)
 
     # R3-P-2 fix: compute winsorize bounds from training data and save them.
-    # First pass: compute features without bounds to get the raw distributions,
-    # then compute bounds from training split, save, and re-apply.
+    # First pass: compute features WITHOUT winsorize bounds (raw distributions).
+    # Bounds will be computed from the training split only to prevent leakage.
     featured = compute_alpha_features(long)
     featured = compute_cross_sectional_features(featured)
 
@@ -537,12 +539,6 @@ def train_model(
             featured = merge_macro_features(featured, str(macro_path))
         except Exception as e:
             logger.warning(f"Could not merge macro features: {e}")
-
-    # Compute and save winsorize bounds from the full training data
-    # so inference uses identical clipping thresholds (C-WINS fix)
-    bounds = compute_winsorize_bounds(featured)
-    save_winsorize_bounds(bounds)
-    logger.info(f"Saved winsorize bounds ({len(bounds)} cols) for inference consistency")
 
     labeled = compute_forward_returns(featured, horizon=5)
     labeled = compute_residual_target(labeled, horizon=5)
@@ -572,6 +568,21 @@ def train_model(
     train_data = labeled.loc[labeled.index.get_level_values(0) <= split_date]
     val_data = labeled.loc[labeled.index.get_level_values(0) >= embargo_date]
 
+    # C-WINS-FIX: compute winsorize bounds from TRAINING split only.
+    # Previously bounds were computed from the full dataset (train + val),
+    # which leaks validation-set statistics into training features.
+    bounds = compute_winsorize_bounds(train_data)
+    save_winsorize_bounds(bounds)
+    logger.info(
+        f"Saved winsorize bounds ({len(bounds)} cols) from training split only "
+        f"(no val leakage)"
+    )
+
+    # Re-winsorize both splits using training-only bounds
+    train_data = winsorize(train_data, bounds=bounds)
+    if len(val_data) > 0:
+        val_data = winsorize(val_data, bounds=bounds)
+
     logger.info(
         f"Training on {len(train_data)} samples (up to {split_date.date()}), "
         f"validating on {len(val_data)} samples (from {embargo_date.date()}, "
@@ -585,7 +596,12 @@ def train_model(
         model.fit(train_data, target_col="target_5d", val_df=val_data)
         # Log validation IC
         val_preds = model.predict(val_data)
-        ic = pd.Series(val_preds, index=val_data.index).corr(val_data["target_5d"])
+        # Use Spearman rank IC (not Pearson) — standard for cross-sectional
+        # equity models, consistent with ensemble's _safe_ic and robust to outliers.
+        from scipy.stats import spearmanr
+
+        ic_val, _ = spearmanr(val_preds, val_data["target_5d"].values)
+        ic = float(ic_val) if not np.isnan(ic_val) else 0.0
         logger.info(f"Live model validation IC: {ic:.4f}")
     else:
         logger.warning("No validation data available — training without early stopping")

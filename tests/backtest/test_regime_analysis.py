@@ -85,9 +85,9 @@ class TestRegimeAnalysis:
 
     def test_worst_drawdown(self):
         analysis = RegimeAnalysis()
-        analysis.results["a"] = RegimeResult("a", "", "", 0.0, 0.0, 0.0, -0.05, 0.0, 100)
-        analysis.results["b"] = RegimeResult("b", "", "", 0.0, 0.0, 0.0, -0.20, 0.0, 100)
-        assert analysis.worst_drawdown == pytest.approx(-0.20)
+        analysis.results["a"] = RegimeResult("a", "", "", 0.0, 0.0, 0.0, 0.05, 0.0, 100)
+        analysis.results["b"] = RegimeResult("b", "", "", 0.0, 0.0, 0.0, 0.20, 0.0, 100)
+        assert analysis.worst_drawdown == pytest.approx(0.20)
 
     def test_summary_dataframe(self):
         analysis = RegimeAnalysis()
@@ -125,10 +125,10 @@ class TestComputeRegimeMetrics:
         result = compute_regime_metrics(returns, "bear", "2020-01-01", "2020-12-31")
         assert result.total_return < 0
 
-    def test_max_drawdown_negative(self):
+    def test_max_drawdown_non_negative(self):
         returns = _make_returns(mean=0.0, periods=252)
         result = compute_regime_metrics(returns, "flat", "2020-01-01", "2020-12-31")
-        assert result.max_drawdown <= 0  # Drawdowns are always <= 0
+        assert result.max_drawdown >= 0  # Drawdowns are positive magnitude
 
     def test_n_days_correct(self):
         returns = _make_returns(periods=100)

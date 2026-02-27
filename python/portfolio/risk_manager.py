@@ -26,17 +26,17 @@ class RiskLimits:
     """Configuration for risk limits."""
 
     # Position limits
-    max_position_weight: float = 0.25  # Max 25% per position
-    max_sector_weight: float = 0.50  # Max 50% per sector
+    max_position_weight: float = 0.30  # Max 30% per position
+    max_sector_weight: float = 0.25  # Max 25% per sector
     min_position_weight: float = 0.01  # Min 1% (avoid dust positions)
 
     # Portfolio limits
-    max_portfolio_var_95: float = 0.05  # Max 5% daily VaR
-    max_drawdown_limit: float = 0.20  # Max 20% drawdown
-    min_sharpe_ratio: float = 0.0  # Minimum Sharpe
+    max_portfolio_var_95: float = 0.06  # Max 6% daily VaR
+    max_drawdown_limit: float = 0.15  # Max 15% drawdown
+    min_sharpe_ratio: float = -0.5  # Minimum Sharpe
 
     # Trading limits
-    max_daily_trades: int = 20  # Max trades per day
+    max_daily_trades: int = 50  # Max trades per day
     max_daily_turnover: float = 1.0  # Max 100% portfolio turnover per day
     max_single_trade_size: float = 0.15  # Max 15% in single trade
 
@@ -169,7 +169,7 @@ class RiskManager:
                     passed=False,
                     rule="MAX_DAILY_TRADES",
                     message=f"Daily trade limit ({self.limits.max_daily_trades}) reached",
-                    severity="critical",
+                    severity="warning",
                     metric_value=daily_count,
                     limit_value=self.limits.max_daily_trades,
                 )
@@ -267,7 +267,7 @@ class RiskManager:
                     rule="MAX_DAILY_TURNOVER",
                     message=f"Daily turnover {daily_to:.1%} reached limit "
                     f"{self.limits.max_daily_turnover:.1%}",
-                    severity="critical",
+                    severity="warning",
                     metric_value=daily_to,
                     limit_value=self.limits.max_daily_turnover,
                 )

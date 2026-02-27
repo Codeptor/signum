@@ -358,11 +358,11 @@ class StressTester:
 
     @staticmethod
     def _calculate_max_dd(returns: pd.Series) -> float:
-        """Calculate maximum drawdown."""
+        """Calculate maximum drawdown (positive convention, e.g. 0.35 = 35% drawdown)."""
         cumulative = (1 + returns).cumprod()
         running_max = cumulative.cummax()
-        drawdowns = (cumulative - running_max) / running_max
-        return float(drawdowns.min())
+        drawdowns = (running_max - cumulative) / running_max
+        return float(drawdowns.max())
 
 
 def monte_carlo_resampling(

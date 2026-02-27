@@ -202,8 +202,8 @@ def _cmd_positions() -> str:
     if not positions:
         return "No open positions."
 
-    total_value = data.get("total_value", 0)
-    total_pl = data.get("total_unrealized_pl", 0)
+    total_value = data.get("total_market_value", 0)
+    total_pl = data.get("total_unrealized_pnl", 0)
 
     lines = [f"POSITIONS ({len(positions)})\n"]
     for p in positions:

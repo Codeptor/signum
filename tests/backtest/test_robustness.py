@@ -382,8 +382,8 @@ class TestCalculateMaxDD:
         dd = StressTester._calculate_max_dd(rets)
         # After +10%: cumulative = 1.10
         # After -20%: cumulative = 1.10 * 0.80 = 0.88
-        # Drawdown from peak 1.10: (0.88 - 1.10) / 1.10 = -0.2
-        assert abs(dd - (-0.2)) < 1e-10
+        # Drawdown from peak 1.10: (1.10 - 0.88) / 1.10 = 0.2
+        assert abs(dd - 0.2) < 1e-10
 
     def test_always_positive_no_drawdown(self):
         """Monotonically increasing returns should have ~0 drawdown."""
@@ -392,10 +392,10 @@ class TestCalculateMaxDD:
         assert abs(dd) < 1e-10
 
     def test_large_drawdown(self):
-        """Series with crash should show large negative drawdown."""
+        """Series with crash should show large positive drawdown magnitude."""
         rets = pd.Series([0.01] * 10 + [-0.05] * 20 + [0.01] * 10)
         dd = StressTester._calculate_max_dd(rets)
-        assert dd < -0.3  # Significant drawdown after 20 days of -5%
+        assert dd > 0.3  # Significant drawdown after 20 days of -5%
 
 
 # ---------------------------------------------------------------------------

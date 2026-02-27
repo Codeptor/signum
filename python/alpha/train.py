@@ -3,14 +3,19 @@
 import logging
 
 import mlflow
+import numpy as np
 import pandas as pd
+from scipy.stats import spearmanr
 
 from python.alpha.features import (
     compute_alpha_features,
     compute_cross_sectional_features,
     compute_forward_returns,
     compute_residual_target,
+    compute_winsorize_bounds,
     merge_macro_features,
+    save_winsorize_bounds,
+    winsorize,
 )
 from python.alpha.model import CrossSectionalModel
 from python.data.ingestion import reshape_ohlcv_wide_to_long
@@ -36,8 +41,6 @@ FEATURE_COLS = [
     "volume_ratio",
     # Cross-sectional (1) — relative strength
     "cs_ret_rank_5d",
-    # Macro (1) — market regime
-    "vix",
 ]
 
 # Full feature set preserved for comparison / ablation studies
@@ -98,6 +101,18 @@ def run_training(data_path: str = "data/raw/sp500_ohlcv.parquet") -> "CrossSecti
     train = labeled.loc[labeled.index.get_level_values(0) <= split_date]
     val = labeled.loc[labeled.index.get_level_values(0) >= embargo_date]
 
+    # Compute and save winsorize bounds from TRAINING split only (no val leakage).
+    # Previously this was missing entirely — models trained via run_training()
+    # had no saved bounds file, causing inference to use stale/wrong bounds.
+    bounds = compute_winsorize_bounds(train)
+    save_winsorize_bounds(bounds)
+    logger.info(f"Saved winsorize bounds ({len(bounds)} cols) from training split")
+
+    # Re-winsorize both splits using training-only bounds
+    train = winsorize(train, bounds=bounds)
+    if len(val) > 0:
+        val = winsorize(val, bounds=bounds)
+
     logger.info(
         f"Train: {len(train)} rows up to {split_date.date()}, "
         f"Val: {len(val)} rows from {embargo_date.date()} "
@@ -108,8 +123,11 @@ def run_training(data_path: str = "data/raw/sp500_ohlcv.parquet") -> "CrossSecti
         model = CrossSectionalModel(model_type="lightgbm", feature_cols=FEATURE_COLS)
         model.fit(train, target_col="target_5d", val_df=val)
 
+        # Use Spearman rank IC (not Pearson) — standard for cross-sectional
+        # equity models, invariant to monotonic transforms and robust to outliers.
         val_preds = model.predict(val)
-        ic = pd.Series(val_preds, index=val.index).corr(val["target_5d"])
+        ic, _ = spearmanr(val_preds, val["target_5d"].values)
+        ic = float(ic) if not np.isnan(ic) else 0.0
 
         mlflow.log_params(model.params)
         mlflow.log_metric("information_coefficient", ic)
@@ -118,7 +136,7 @@ def run_training(data_path: str = "data/raw/sp500_ohlcv.parquet") -> "CrossSecti
 
         importance = model.feature_importance()
         logger.info(f"Top features:\n{importance.head(10)}")
-        logger.info(f"Validation IC: {ic:.4f}")
+        logger.info(f"Validation IC (Spearman): {ic:.4f}")
 
     return model
 
