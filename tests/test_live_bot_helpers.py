@@ -209,22 +209,25 @@ class TestSecondsUntil:
 
 
 class TestSendAlert:
-    def test_no_webhook_url_does_nothing(self):
-        """When ALERT_WEBHOOK_URL is not set, _send_alert is a no-op."""
-        with patch("examples.live_bot.ALERT_WEBHOOK_URL", None):
-            from examples.live_bot import _send_alert
-
-            # Should not raise
-            _send_alert("test alert")
-
-    def test_webhook_failure_swallowed(self):
-        """Network errors in _send_alert must never propagate."""
-        with patch("examples.live_bot.ALERT_WEBHOOK_URL", "https://hooks.example.com/test"):
-            with patch("urllib.request.urlopen", side_effect=Exception("network down")):
+    def test_no_channels_configured_is_noop(self):
+        """When no alerting channels are configured, _send_alert is a no-op."""
+        with patch("python.monitoring.alerting.ALERT_WEBHOOK_URL", ""):
+            with patch("python.monitoring.alerting.SMTP_HOST", ""):
                 from examples.live_bot import _send_alert
 
                 # Should not raise
                 _send_alert("test alert")
+
+    def test_alert_failure_swallowed(self):
+        """Alerting errors must never propagate to the caller."""
+        # Test at the module level: alerting module swallows errors
+        with patch(
+            "python.monitoring.alerting._send_webhook",
+            side_effect=Exception("network"),
+        ):
+            from python.monitoring.alerting import send_alert
+
+            send_alert("test alert")  # Must not raise
 
 
 # ===========================================================================

@@ -31,11 +31,37 @@ from python.brokers.alpaca_broker import AlpacaBroker
 from python.brokers.base import BrokerOrder
 from python.data.config import RISK_ENGINE_CACHE_PATH, STALE_DATA_EXPOSURE_MULT
 from python.data.sectors import DEFAULT_MAX_SECTOR_WEIGHT, SECTOR_MAP
+from python.monitoring.alerting import AlertSeverity, send_alert, send_heartbeat, send_trade_summary
 from python.monitoring.regime import RegimeDetector, RegimeState, fetch_spy_drawdown, fetch_vix
 from python.portfolio.risk_manager import RiskLimits, RiskManager
 
 # --- Logging with rotation (Fix #36) ---
-_log_formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+# JSON logging: set LOG_FORMAT=json for structured output (machine-parseable).
+# Default: human-readable format for console/file debugging.
+
+
+class _JsonFormatter(logging.Formatter):
+    """Structured JSON log formatter for production observability."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        import json as _json
+
+        entry = {
+            "ts": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        if record.exc_info and record.exc_info[1]:
+            entry["exception"] = self.formatException(record.exc_info)
+        return _json.dumps(entry, default=str)
+
+
+_log_format = os.getenv("LOG_FORMAT", "text")  # "text" or "json"
+if _log_format == "json":
+    _log_formatter = _JsonFormatter()
+else:
+    _log_formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
 _console_handler = logging.StreamHandler(sys.stdout)
 _console_handler.setFormatter(_log_formatter)
@@ -114,7 +140,8 @@ REBALANCE_DAY = _env_int("REBALANCE_DAY", 2)  # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fr
 REBALANCE_FREQUENCY = os.getenv("REBALANCE_FREQUENCY", "weekly")  # "daily" or "weekly"
 
 # --- Alerting (Fix #37) ---
-ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL")  # Slack/Discord/generic webhook
+# Alerting now handled by python.monitoring.alerting module (email + webhook).
+# ALERT_WEBHOOK_URL is read directly by the alerting module from env.
 
 
 def should_rebalance_today() -> bool:
@@ -200,41 +227,32 @@ def _liquidate_all_positions(broker: AlpacaBroker) -> int:
                 f"MANUAL INTERVENTION MAY BE REQUIRED."
             )
             _send_alert(
-                f"[LiveBot] WARNING: Liquidation of {entry['symbol']} not confirmed "
-                f"(status={result['status']}). Check manually!"
+                f"Liquidation of {entry['symbol']} not confirmed "
+                f"(status={result['status']}). Check manually!",
+                AlertSeverity.CRITICAL,
             )
 
     logger.info(
         f"Liquidation complete: {confirmed}/{len(submitted)} fills confirmed "
         f"out of {len(positions)} positions."
     )
-    _send_alert(f"[LiveBot] Liquidated {confirmed} positions due to emergency condition.")
+    _send_alert(
+        f"Liquidated {confirmed} positions due to emergency condition.",
+        AlertSeverity.CRITICAL,
+    )
     return confirmed
 
 
-def _send_alert(message: str) -> None:
-    """Fire-and-forget alert to a webhook URL (Slack/Discord/custom).
+def _send_alert(message: str, severity: AlertSeverity = AlertSeverity.WARNING) -> None:
+    """Fire-and-forget alert via email + webhook.
 
-    Does nothing if ALERT_WEBHOOK_URL is not set.  Never raises — alerting
-    failures must not mask the original error.
+    Delegates to python.monitoring.alerting which handles:
+    - SMTP email delivery (background thread)
+    - Webhook POST (Slack/Discord/generic)
+    - Rate limiting to prevent alert storms
+    - Never raises — alerting failures are swallowed.
     """
-    if not ALERT_WEBHOOK_URL:
-        return
-    try:
-        import json
-        import urllib.request
-
-        payload = json.dumps({"text": message}).encode("utf-8")
-        req = urllib.request.Request(
-            ALERT_WEBHOOK_URL,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=10)
-    except Exception:
-        # Swallow — alerting must never crash the crash handler
-        logger.debug("Failed to send alert webhook", exc_info=True)
+    send_alert(message, severity=severity)
 
 
 def _verify_order_fill(
@@ -607,7 +625,7 @@ def run_trading_cycle(
             return False
     except Exception as e:
         logger.error(f"Could not check market status: {e}")
-        _send_alert(f"[LiveBot] Failed to check market status: {e}")
+        _send_alert(f"Failed to check market status: {e}", AlertSeverity.CRITICAL)
         return False
 
     # 0. Clean up orphaned SL/TP orders from previous cycles (H3 fix)
@@ -661,7 +679,7 @@ def run_trading_cycle(
         )
     except Exception as e:
         logger.error(f"ML pipeline failed: {e}", exc_info=True)
-        _send_alert(f"[LiveBot] ML pipeline failed: {e}")
+        _send_alert(f"ML pipeline failed: {e}", AlertSeverity.CRITICAL)
         return False
 
     if not target_weights:
@@ -676,7 +694,7 @@ def run_trading_cycle(
         )
         target_weights = {t: w * mult for t, w in target_weights.items()}
         _send_alert(
-            f"[LiveBot] Trading on stale data — exposure reduced to {mult:.0%} of target weights."
+            f"Trading on stale data — exposure reduced to {mult:.0%} of target weights.",
         )
 
     logger.info(f"Target weights from ML pipeline ({len(target_weights)} positions):")
@@ -702,9 +720,9 @@ def run_trading_cycle(
             if severe:
                 logger.warning(f"  High PSI (>0.2) features: {severe}")
             _send_alert(
-                f"[LiveBot] Feature drift detected: {len(drifted_features)}/{total_features} "
+                f"Feature drift detected: {len(drifted_features)}/{total_features} "
                 f"features drifted. High-PSI: {severe or 'none'}. "
-                f"Model predictions may be degraded."
+                f"Model predictions may be degraded.",
             )
         else:
             logger.info(f"Drift check passed: 0/{total_features} features drifted")
@@ -754,7 +772,7 @@ def run_trading_cycle(
 
     if not target_weights:
         logger.error("No tradeable tickers remaining — skipping cycle")
-        _send_alert("[LiveBot] No tradeable tickers after price filtering")
+        _send_alert("No tradeable tickers after price filtering", AlertSeverity.CRITICAL)
         return False
 
     # 4. Sync execution bridge with current account/positions from broker
@@ -1013,6 +1031,11 @@ def run_trading_cycle(
             logger.error(
                 f"  REJECTED: {entry['side'].upper()} {entry['qty']:.4f} {entry['symbol']}"
             )
+            _send_alert(
+                f"Order REJECTED by broker: "
+                f"{entry['side'].upper()} {entry['qty']:.4f} {entry['symbol']}",
+                AlertSeverity.CRITICAL,
+            )
         else:
             # timeout or unknown
             logger.warning(
@@ -1025,6 +1048,18 @@ def run_trading_cycle(
         f"{partial_count} partial, {failed_count} failed "
         f"out of {len(submitted_orders)} submitted."
     )
+
+    # Send trade summary alert (email + webhook)
+    account = broker.get_account()
+    send_trade_summary(
+        filled=filled_count,
+        partial=partial_count,
+        failed=failed_count,
+        total=len(submitted_orders),
+        positions=target_weights,
+        equity=account.equity if account else None,
+    )
+
     return filled_count > 0 or partial_count > 0
 
 
@@ -1086,7 +1121,15 @@ def main():
 
     if not broker.connect():
         logger.error("Failed to connect to Alpaca. Exiting.")
+        _send_alert("Failed to connect to Alpaca on startup. Exiting.", AlertSeverity.CRITICAL)
         sys.exit(1)
+
+    # Startup alert — confirms the bot is alive after deploy/restart
+    _send_alert(
+        f"Bot started. Mode: {'PAPER' if paper_trading else 'LIVE'}. "
+        f"Rebalance: {REBALANCE_FREQUENCY} (day={REBALANCE_DAY}).",
+        AlertSeverity.INFO,
+    )
 
     # --- SIGTERM handler (H4): persist state on container/systemd kill ---
     # C3 fix: Save comprehensive state including positions and trade tracking,
@@ -1109,7 +1152,7 @@ def main():
             }
             state["cash"] = bridge_obj.cash
         _save_bot_state(state)
-        _send_alert("[LiveBot] Received SIGTERM — shutting down gracefully.")
+        _send_alert("Received SIGTERM — shutting down gracefully.", AlertSeverity.INFO)
         broker.disconnect()
         logger.info("SIGTERM shutdown complete.")
         sys.exit(0)
@@ -1224,8 +1267,9 @@ def main():
                             "MAX_DRAWDOWN exceeded — liquidating all positions (kill switch)."
                         )
                         _send_alert(
-                            f"[LiveBot] DRAWDOWN KILL SWITCH: "
-                            f"{drawdown_violations[0].message}. Liquidating all positions."
+                            f"DRAWDOWN KILL SWITCH: "
+                            f"{drawdown_violations[0].message}. Liquidating all positions.",
+                            AlertSeverity.CRITICAL,
                         )
                         _liquidate_all_positions(broker)
                         time.sleep(60 * 30)
@@ -1246,8 +1290,9 @@ def main():
                             f"(VaR {v.metric_value:.2%} → target {v.limit_value:.2%})"
                         )
                         _send_alert(
-                            f"[LiveBot] VaR breach: scaling positions by {scale:.2f}. "
-                            f"VaR={v.metric_value:.2%}, limit={v.limit_value:.2%}"
+                            f"VaR breach: scaling positions by {scale:.2f}. "
+                            f"VaR={v.metric_value:.2%}, limit={v.limit_value:.2%}",
+                            AlertSeverity.CRITICAL,
                         )
                         bridge.reconcile_target_weights(
                             target_weights=scaled.to_dict(),
@@ -1257,6 +1302,13 @@ def main():
                         logger.warning(
                             "Skipping trade cycle due to critical risk violations "
                             "(no reduce-to-compliance path available)."
+                        )
+                        violations_str = "; ".join(
+                            f"{v.rule}: {v.message}" for v in critical_violations
+                        )
+                        _send_alert(
+                            f"Skipping trade cycle — critical risk violations: {violations_str}",
+                            AlertSeverity.CRITICAL,
                         )
                     time.sleep(60 * 30)
                     continue
@@ -1271,8 +1323,9 @@ def main():
                     if regime_state.regime == "halt":
                         logger.warning("Market regime HALT — liquidating all positions.")
                         _send_alert(
-                            f"[LiveBot] Market regime HALT: VIX={vix:.1f}, "
-                            f"SPY drawdown={spy_dd:.1%}. Liquidating all positions."
+                            f"Market regime HALT: VIX={vix:.1f}, "
+                            f"SPY drawdown={spy_dd:.1%}. Liquidating all positions.",
+                            AlertSeverity.CRITICAL,
                         )
                         # H1 fix: Actually close positions instead of just logging
                         _liquidate_all_positions(broker)
@@ -1285,7 +1338,7 @@ def main():
                         "Could not fetch regime data (VIX/SPY). "
                         "Fail-closed: assuming CAUTION regime (50% exposure)."
                     )
-                    _send_alert("[LiveBot] Regime data unavailable — defaulting to caution mode.")
+                    _send_alert("Regime data unavailable — defaulting to caution mode.")
                     regime_state = RegimeState(
                         regime="caution",
                         vix=0.0,
@@ -1324,6 +1377,13 @@ def main():
                 # R3-E-12 fix: append to equity_history.json for dashboard visibility
                 _append_equity_history(current_equity)
 
+                # Heartbeat: periodic "all is well" signal (1/hour max)
+                send_heartbeat(
+                    f"Cycle complete. Equity: ${current_equity:,.2f}, "
+                    f"positions: {len(bridge.positions)}, "
+                    f"traded: {'yes' if traded else 'no'}"
+                )
+
                 if traded:
                     # R3-E-2 fix: re-fetch clock after trading to get fresh next_open
                     fresh_clock = broker.get_clock()
@@ -1360,10 +1420,13 @@ def main():
 
     except KeyboardInterrupt:
         logger.info("Bot stopped by user (Ctrl+C).")
+        _send_alert("Bot stopped by user (Ctrl+C).", AlertSeverity.INFO)
     except Exception as e:
         logger.error(f"Fatal error in bot loop: {e}", exc_info=True)
+        now_et = datetime.now(tz=ZoneInfo("America/New_York"))
         _send_alert(
-            f"[LiveBot FATAL] Bot crashed at {datetime.now(tz=ZoneInfo('America/New_York')).isoformat()}: {e}"
+            f"FATAL: Bot crashed at {now_et.isoformat()}: {e}",
+            AlertSeverity.CRITICAL,
         )
     finally:
         # M-SIGTERM fix: don't overwrite richer SIGTERM state

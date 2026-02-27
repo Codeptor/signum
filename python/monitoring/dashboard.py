@@ -1441,6 +1441,7 @@ _API_ENDPOINTS = {
     "/api/drift": "Latest ML feature drift report (KS stat, PSI per feature)",
     "/api/bot": "Bot state (last trade date, shutdown reason, positions count)",
     "/api/logs": "Latest bot log lines (default 80, ?lines=N to customize)",
+    "/healthz": "Health check: bot liveness, alerting status, data freshness",
 }
 
 
@@ -1677,6 +1678,79 @@ def register_api_routes(app: dash.Dash) -> None:
                 "n_lines": len(lines),
                 "log": lines,
             }
+        )
+
+    # ── GET /healthz — health check (P3-8) ──
+    @server.route("/healthz")
+    def healthz():
+        """Health check endpoint for external monitoring (uptime tools, load balancers).
+
+        Returns 200 if the dashboard is responsive. Includes:
+        - Bot process liveness (checks bot_state.json recency)
+        - Alerting configuration status
+        - Data freshness (OHLCV cache age)
+        """
+        from python.data.config import OHLCV_CACHE_META_PATH
+
+        now = datetime.now()
+        checks: dict = {"dashboard": "ok"}
+        overall_status = 200
+
+        # Bot liveness: check if bot_state.json was updated recently
+        bot = _load_bot_state()
+        if bot:
+            last_date_str = bot.get("last_trade_date") or bot.get("last_shutdown")
+            if last_date_str:
+                try:
+                    last_dt = datetime.fromisoformat(last_date_str.replace("Z", "+00:00"))
+                    age_hours = (now.astimezone() - last_dt).total_seconds() / 3600
+                    checks["bot_last_seen_hours_ago"] = round(age_hours, 1)
+                    # Flag as degraded if bot hasn't been seen in > 7 days
+                    # (weekly rebalance = bot sleeps most of the week)
+                    if age_hours > 168:
+                        checks["bot"] = "stale"
+                        overall_status = 503
+                    else:
+                        checks["bot"] = "ok"
+                except (ValueError, TypeError):
+                    checks["bot"] = "unknown"
+            else:
+                checks["bot"] = "no_timestamp"
+        else:
+            checks["bot"] = "no_state_file"
+
+        # Alerting configuration
+        try:
+            from python.monitoring.alerting import get_alerting_status
+
+            checks["alerting"] = get_alerting_status()
+        except ImportError:
+            checks["alerting"] = "module_unavailable"
+
+        # OHLCV data freshness
+        try:
+            meta_path = Path(OHLCV_CACHE_META_PATH)
+            if meta_path.exists():
+                with open(meta_path) as f:
+                    meta = json.load(f)
+                cache_date = meta.get("date", "unknown")
+                checks["ohlcv_cache_date"] = cache_date
+            else:
+                checks["ohlcv_cache_date"] = "no_cache"
+        except Exception:
+            checks["ohlcv_cache_date"] = "error"
+
+        # Alpaca connectivity (lightweight — just checks auth, no positions)
+        has_creds = bool(os.getenv("ALPACA_API_KEY") and os.getenv("ALPACA_API_SECRET"))
+        checks["alpaca_configured"] = has_creds
+
+        return _json_response(
+            {
+                "status": "healthy" if overall_status == 200 else "degraded",
+                "timestamp": now.isoformat(),
+                "checks": checks,
+            },
+            overall_status,
         )
 
 

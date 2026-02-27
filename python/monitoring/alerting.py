@@ -1,0 +1,339 @@
+"""
+Alerting module — multi-channel alert delivery for Signum trading bot.
+
+Supports:
+  - Email (SMTP) — primary channel for trade notifications
+  - Webhook (Slack/Discord/generic) — existing behavior, now centralized
+
+Design principles:
+  - Fire-and-forget: alerting failures NEVER propagate or mask real errors
+  - Severity levels: INFO (heartbeats), WARNING (degraded), CRITICAL (action needed)
+  - Rate limiting: prevent alert storms during cascading failures
+  - Thread-safe: email sends happen in background threads to avoid blocking
+
+Usage:
+    from python.monitoring.alerting import send_alert, AlertSeverity
+
+    send_alert("Trade cycle completed: 8 fills", severity=AlertSeverity.INFO)
+    send_alert("ML pipeline failed: timeout", severity=AlertSeverity.CRITICAL)
+"""
+
+import json
+import logging
+import os
+import smtplib
+import threading
+import time
+import urllib.request
+from datetime import datetime
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from enum import Enum
+from zoneinfo import ZoneInfo
+
+logger = logging.getLogger("signum.alerting")
+
+
+# ---------------------------------------------------------------------------
+# Severity levels
+# ---------------------------------------------------------------------------
+class AlertSeverity(str, Enum):
+    """Alert severity — determines email subject prefix and formatting."""
+
+    INFO = "info"  # Heartbeats, successful trades
+    WARNING = "warning"  # Degraded mode, stale data, caution regime
+    CRITICAL = "critical"  # Crashes, kill switches, liquidations
+
+
+# Severity → emoji-free prefix for email subjects
+_SEVERITY_PREFIX = {
+    AlertSeverity.INFO: "[Signum]",
+    AlertSeverity.WARNING: "[Signum WARNING]",
+    AlertSeverity.CRITICAL: "[Signum CRITICAL]",
+}
+
+# ---------------------------------------------------------------------------
+# Configuration — all from environment variables
+# ---------------------------------------------------------------------------
+
+# Email (SMTP)
+SMTP_HOST = os.getenv("SMTP_HOST", "")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+SMTP_FROM = os.getenv("SMTP_FROM", "")  # Sender address (defaults to SMTP_USER)
+ALERT_EMAIL_TO = os.getenv("ALERT_EMAIL_TO", "")  # Comma-separated recipients
+SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() in ("true", "1", "yes")
+
+# Webhook (Slack/Discord/generic)
+ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "")
+
+# Rate limiting — max alerts per window to prevent storms
+_RATE_LIMIT_WINDOW_SECS = 300  # 5-minute window
+_RATE_LIMIT_MAX_ALERTS = 20  # Max alerts per window
+_alert_timestamps: list[float] = []
+_alert_lock = threading.Lock()
+
+# Track last heartbeat to avoid spamming.
+# Initialize to -inf so the first heartbeat always fires regardless of uptime.
+_last_heartbeat_ts: float = float("-inf")
+_HEARTBEAT_COOLDOWN_SECS = 3600  # At most one heartbeat per hour
+
+
+def _is_email_configured() -> bool:
+    """Check if email alerting has the minimum required config."""
+    return bool(SMTP_HOST and SMTP_USER and SMTP_PASSWORD and ALERT_EMAIL_TO)
+
+
+def _is_webhook_configured() -> bool:
+    """Check if webhook alerting is configured."""
+    return bool(ALERT_WEBHOOK_URL)
+
+
+def _is_rate_limited() -> bool:
+    """Check if we've exceeded the alert rate limit."""
+    now = time.monotonic()
+    with _alert_lock:
+        # Prune old timestamps
+        cutoff = now - _RATE_LIMIT_WINDOW_SECS
+        _alert_timestamps[:] = [t for t in _alert_timestamps if t > cutoff]
+        if len(_alert_timestamps) >= _RATE_LIMIT_MAX_ALERTS:
+            return True
+        _alert_timestamps.append(now)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Email delivery
+# ---------------------------------------------------------------------------
+
+
+def _send_email(subject: str, body_text: str, body_html: str | None = None) -> None:
+    """Send an email via SMTP. Runs in the calling thread (caller wraps in bg thread)."""
+    if not _is_email_configured():
+        return
+
+    sender = SMTP_FROM or SMTP_USER
+    recipients = [r.strip() for r in ALERT_EMAIL_TO.split(",") if r.strip()]
+    if not recipients:
+        return
+
+    msg = MIMEMultipart("alternative")
+    msg["From"] = f"Signum Bot <{sender}>"
+    msg["To"] = ", ".join(recipients)
+    msg["Subject"] = subject
+
+    msg.attach(MIMEText(body_text, "plain"))
+    if body_html:
+        msg.attach(MIMEText(body_html, "html"))
+
+    try:
+        if SMTP_USE_TLS:
+            server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15)
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+        else:
+            server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15)
+            server.ehlo()
+
+        server.login(SMTP_USER, SMTP_PASSWORD)
+        server.sendmail(sender, recipients, msg.as_string())
+        server.quit()
+        logger.debug(f"Email sent to {recipients}: {subject}")
+    except Exception:
+        logger.debug("Failed to send email alert", exc_info=True)
+
+
+def _format_email_html(message: str, severity: AlertSeverity) -> str:
+    """Format alert as a simple HTML email body."""
+    now = datetime.now(tz=ZoneInfo("America/New_York"))
+    color = {
+        AlertSeverity.INFO: "#2d7d46",
+        AlertSeverity.WARNING: "#b8860b",
+        AlertSeverity.CRITICAL: "#cc3333",
+    }.get(severity, "#333333")
+
+    # noqa: E501 — HTML email template; inline styles are intentionally long
+    body_style = (
+        "font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; "
+        "max-width: 600px; margin: 0 auto; padding: 20px;"
+    )
+    box_style = (
+        f"border-left: 4px solid {color}; padding: 12px 16px; "
+        "background: #f8f9fa; margin-bottom: 16px;"
+    )
+    label_style = (
+        f"color: {color}; font-weight: 600; font-size: 12px; "
+        "text-transform: uppercase; margin-bottom: 4px;"
+    )
+    msg_style = "color: #1a1a1a; font-size: 14px; line-height: 1.5; white-space: pre-wrap;"
+    ts = now.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+    return f"""\
+<html>
+<body style="{body_style}">
+  <div style="{box_style}">
+    <div style="{label_style}">
+      {severity.value}
+    </div>
+    <div style="{msg_style}">{message}</div>
+  </div>
+  <div style="color: #888; font-size: 11px; margin-top: 16px;">
+    Signum Trading Bot &middot; {ts}
+  </div>
+</body>
+</html>"""
+
+
+# ---------------------------------------------------------------------------
+# Webhook delivery
+# ---------------------------------------------------------------------------
+
+
+def _send_webhook(message: str) -> None:
+    """POST JSON payload to webhook URL (Slack/Discord compatible)."""
+    if not _is_webhook_configured():
+        return
+    try:
+        payload = json.dumps({"text": message}).encode("utf-8")
+        req = urllib.request.Request(
+            ALERT_WEBHOOK_URL,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=10)
+    except Exception:
+        logger.debug("Failed to send webhook alert", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def send_alert(
+    message: str,
+    severity: AlertSeverity = AlertSeverity.WARNING,
+    *,
+    subject: str | None = None,
+    bypass_rate_limit: bool = False,
+) -> None:
+    """Send an alert through all configured channels.
+
+    This is the single entry point for all alerting. It:
+      1. Checks rate limits (unless bypassed for CRITICAL)
+      2. Sends webhook (synchronous, fast)
+      3. Sends email (background thread, ~2-5s)
+
+    Never raises — alerting failures are swallowed and logged at DEBUG level.
+
+    Parameters
+    ----------
+    message : str
+        The alert message body.
+    severity : AlertSeverity
+        INFO, WARNING, or CRITICAL. Affects email subject and formatting.
+    subject : str, optional
+        Custom email subject. Auto-generated from severity + first line if omitted.
+    bypass_rate_limit : bool
+        Skip rate limiting. Use for CRITICAL alerts that must always deliver.
+    """
+    try:
+        # Rate limiting (CRITICAL always bypasses)
+        if severity == AlertSeverity.CRITICAL:
+            bypass_rate_limit = True
+
+        if not bypass_rate_limit and _is_rate_limited():
+            logger.debug(
+                f"Alert rate-limited (>{_RATE_LIMIT_MAX_ALERTS}/{_RATE_LIMIT_WINDOW_SECS}s)"
+            )
+            return
+
+        # Build subject line
+        prefix = _SEVERITY_PREFIX.get(severity, "[Signum]")
+        if subject is None:
+            # Use first line of message, truncated
+            first_line = message.split("\n")[0][:80]
+            subject = f"{prefix} {first_line}"
+        else:
+            subject = f"{prefix} {subject}"
+
+        # Webhook (synchronous — fast enough at ~100ms)
+        _send_webhook(message)
+
+        # Email (background thread to avoid blocking trading logic)
+        if _is_email_configured():
+            body_html = _format_email_html(message, severity)
+            thread = threading.Thread(
+                target=_send_email,
+                args=(subject, message, body_html),
+                daemon=True,
+            )
+            thread.start()
+
+    except Exception:
+        # Nuclear fallback — alerting must never crash anything
+        logger.debug("send_alert failed entirely", exc_info=True)
+
+
+def send_heartbeat(
+    message: str,
+    *,
+    force: bool = False,
+) -> None:
+    """Send an INFO heartbeat alert, rate-limited to one per hour.
+
+    Use for periodic "all is well" signals so silence = problem.
+    """
+    global _last_heartbeat_ts
+    now = time.monotonic()
+    if not force and (now - _last_heartbeat_ts) < _HEARTBEAT_COOLDOWN_SECS:
+        return
+    _last_heartbeat_ts = now
+    send_alert(message, severity=AlertSeverity.INFO)
+
+
+def send_trade_summary(
+    filled: int,
+    partial: int,
+    failed: int,
+    total: int,
+    positions: dict[str, float] | None = None,
+    equity: float | None = None,
+) -> None:
+    """Send a structured trade cycle summary.
+
+    Aggregates fill results into a single actionable alert.
+    """
+    lines = [
+        f"Trade cycle completed: {filled} filled, "
+        f"{partial} partial, {failed} failed / {total} submitted"
+    ]
+    if equity is not None:
+        lines.append(f"Portfolio equity: ${equity:,.2f}")
+    if positions:
+        lines.append(f"Holdings ({len(positions)}):")
+        for ticker, weight in sorted(positions.items(), key=lambda x: -x[1])[:10]:
+            lines.append(f"  {ticker}: {weight:.1%}")
+
+    severity = AlertSeverity.INFO if failed == 0 else AlertSeverity.WARNING
+    send_alert(
+        "\n".join(lines),
+        severity=severity,
+        subject="Trade cycle summary",
+    )
+
+
+def get_alerting_status() -> dict:
+    """Return current alerting configuration status (for /healthz)."""
+    return {
+        "email_configured": _is_email_configured(),
+        "webhook_configured": _is_webhook_configured(),
+        "smtp_host": SMTP_HOST or None,
+        "recipients": [r.strip() for r in ALERT_EMAIL_TO.split(",") if r.strip()]
+        if ALERT_EMAIL_TO
+        else [],
+        "rate_limit": f"{_RATE_LIMIT_MAX_ALERTS}/{_RATE_LIMIT_WINDOW_SECS}s",
+    }
