@@ -299,6 +299,7 @@ class TestGetMlWeightsOrchestration:
     fetch_universe; instead it calls fetch_ohlcv + reshape_ohlcv_wide_to_long
     directly, so mocks must match the new flow."""
 
+    @patch("python.alpha.predict.apply_confidence_sizing", side_effect=lambda w, **kw: w)
     @patch("python.alpha.predict.optimize_weights")
     @patch("python.alpha.predict.rank_stocks")
     @patch("python.alpha.predict.compute_features")
@@ -315,6 +316,7 @@ class TestGetMlWeightsOrchestration:
         mock_features,
         mock_rank,
         mock_optimize,
+        mock_confidence,
     ):
         from python.alpha.predict import get_ml_weights
 
