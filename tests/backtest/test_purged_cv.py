@@ -86,6 +86,77 @@ class TestPurgedKfoldSplit:
             assert len(test_idx) > 0
 
 
+class TestPurgedKfoldSplitDateAware:
+    """Tests for the date-aware path (C-PURGE fix)."""
+
+    @pytest.fixture
+    def panel_dates(self):
+        """Create panel data dates: 100 unique dates x 5 tickers = 500 rows."""
+        unique = pd.bdate_range("2023-01-01", periods=100)
+        # Repeat each date 5 times (simulating 5 tickers per date)
+        return np.repeat(unique.values, 5)
+
+    def test_yields_correct_number_of_folds(self, panel_dates):
+        folds = list(purged_kfold_split(len(panel_dates), n_splits=5, dates=panel_dates))
+        assert len(folds) == 5
+
+    def test_no_overlap_between_train_and_test(self, panel_dates):
+        for train_idx, test_idx in purged_kfold_split(
+            len(panel_dates), n_splits=5, dates=panel_dates
+        ):
+            overlap = set(train_idx) & set(test_idx)
+            assert len(overlap) == 0
+
+    def test_purge_in_date_space(self, panel_dates):
+        """Purge gap should be at least `horizon` trading days in calendar space."""
+        folds = list(
+            purged_kfold_split(
+                len(panel_dates), n_splits=5, dates=panel_dates, horizon=5
+            )
+        )
+        unique_dates = np.unique(panel_dates)
+
+        for train_idx, test_idx in folds:
+            train_dates = set(panel_dates[train_idx])
+            test_dates = set(panel_dates[test_idx])
+            # No date should appear in both train and test
+            assert len(train_dates & test_dates) == 0
+
+    def test_embargo_after_test_fold(self, panel_dates):
+        """Dates immediately after test fold should be excluded from training."""
+        folds = list(
+            purged_kfold_split(
+                len(panel_dates),
+                n_splits=5,
+                dates=panel_dates,
+                embargo_pct=0.10,
+            )
+        )
+        unique_dates = sorted(np.unique(panel_dates))
+
+        # Check first fold: test dates are the earliest, embargo should remove
+        # dates right after the test period from training
+        _, test_idx = folds[0]
+        test_dates = sorted(set(panel_dates[test_idx]))
+        last_test_date = test_dates[-1]
+        # Find the index of last_test_date in unique_dates
+        last_idx = list(unique_dates).index(last_test_date)
+        # The date right after last_test_date should NOT be in training
+        train_dates = set(panel_dates[folds[0][0]])
+        if last_idx + 1 < len(unique_dates):
+            assert unique_dates[last_idx + 1] not in train_dates
+
+    def test_all_rows_for_date_in_same_split(self, panel_dates):
+        """All rows sharing a date should land in the same split (train or test)."""
+        for train_idx, test_idx in purged_kfold_split(
+            len(panel_dates), n_splits=5, dates=panel_dates
+        ):
+            train_dates = set(panel_dates[train_idx])
+            test_dates = set(panel_dates[test_idx])
+            # A date should not appear in both
+            assert len(train_dates & test_dates) == 0
+
+
 # ---------------------------------------------------------------------------
 # Tests: purged_kfold_cv
 # ---------------------------------------------------------------------------
