@@ -9,6 +9,9 @@ target/
 data/raw/
 data/processed/
 data/models/
+data/cache/
+data/bot_state.json
+data/equity_history.json
 mlruns/
 
 # IDE and editor files
