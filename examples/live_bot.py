@@ -1085,15 +1085,17 @@ def run_trading_cycle(
                     # Use pre-submission decision price (captured at order time)
                     # for accurate implementation shortfall measurement.
                     dp = entry.get("decision_price") or order_info.filled_avg_price
-                    tca_analyzer.add_trade(TradeRecord(
-                        symbol=entry["symbol"],
-                        side=entry["side"].upper(),
-                        order_qty=entry["qty"],
-                        fill_qty=float(order_info.filled_qty or 0),
-                        fill_price=float(order_info.filled_avg_price),
-                        decision_price=float(dp),
-                        timestamp=datetime.now(tz=ZoneInfo("America/New_York")),
-                    ))
+                    tca_analyzer.add_trade(
+                        TradeRecord(
+                            symbol=entry["symbol"],
+                            side=entry["side"].upper(),
+                            order_qty=entry["qty"],
+                            fill_qty=float(order_info.filled_qty or 0),
+                            fill_price=float(order_info.filled_avg_price),
+                            decision_price=float(dp),
+                            timestamp=datetime.now(tz=ZoneInfo("America/New_York")),
+                        )
+                    )
             except Exception as e:
                 logger.debug(f"TCA recording failed for {entry['symbol']}: {e}")
 
@@ -1114,7 +1116,10 @@ def run_trading_cycle(
                 tca_report_path = Path("data/cache/tca_report.json")
                 tca_report_path.parent.mkdir(parents=True, exist_ok=True)
                 import json as _json
-                tca_report_path.write_text(_json.dumps(tca_analyzer.to_json(), indent=2, default=str))
+
+                tca_report_path.write_text(
+                    _json.dumps(tca_analyzer.to_json(), indent=2, default=str)
+                )
             except Exception as e:
                 logger.debug(f"TCA report save failed: {e}")
 
@@ -1158,6 +1163,34 @@ def _seconds_until(target_ts) -> float:
     return max(delta, 60.0)
 
 
+def _prune_mlflow_runs(max_age_days: int = 30) -> None:
+    """Delete MLflow runs older than *max_age_days* to prevent disk bloat."""
+    try:
+        import shutil
+        from pathlib import Path as _P
+
+        mlruns_dir = _P("mlruns")
+        if not mlruns_dir.exists():
+            return
+
+        cutoff = time.time() - max_age_days * 86400
+        pruned = 0
+        for experiment_dir in mlruns_dir.iterdir():
+            if not experiment_dir.is_dir() or experiment_dir.name.startswith("."):
+                continue
+            for run_dir in experiment_dir.iterdir():
+                if not run_dir.is_dir():
+                    continue
+                meta = run_dir / "meta.yaml"
+                if meta.exists() and meta.stat().st_mtime < cutoff:
+                    shutil.rmtree(run_dir)
+                    pruned += 1
+        if pruned:
+            logger.info(f"Pruned {pruned} MLflow runs older than {max_age_days} days")
+    except Exception as e:
+        logger.debug(f"MLflow pruning skipped: {e}")
+
+
 def main():
     logger.info("=" * 60)
     logger.info("  LIVE TRADING BOT — ML-Driven")
@@ -1171,6 +1204,9 @@ def main():
     )
     logger.info(f"  Max drawdown: {MAX_DRAWDOWN_LIMIT:.0%}")
     logger.info("=" * 60)
+
+    # Prune old MLflow runs to prevent disk bloat on VPS
+    _prune_mlflow_runs(max_age_days=30)
 
     # M3 fix: paper_trading from env var (default True for safety)
     paper_trading = os.getenv("LIVE_TRADING", "").lower() != "true"
@@ -1414,9 +1450,7 @@ def main():
                     try:
                         import yfinance as yf
 
-                        spy_recent = yf.download(
-                            "SPY", period="3mo", interval="1d", progress=False
-                        )
+                        spy_recent = yf.download("SPY", period="3mo", interval="1d", progress=False)
                         if spy_recent is not None and len(spy_recent) > 25:
                             spy_rets = spy_recent["Close"].pct_change().dropna()
                             hmm_state = hmm_detector.predict_regime(spy_rets)
