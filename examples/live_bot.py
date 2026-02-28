@@ -1299,7 +1299,11 @@ def main():
 
         spy = yf.download("SPY", period="2y", interval="1d", progress=False)
         if spy is not None and len(spy) > 60:
-            spy_returns = spy["Close"].pct_change().dropna()
+            close = spy["Close"]
+            # yfinance 0.2.x with auto_adjust=True returns MultiIndex columns
+            if hasattr(close, "columns"):
+                close = close.squeeze()
+            spy_returns = close.pct_change().dropna()
             hmm_detector = HMMRegimeDetector()
             hmm_detector.fit(spy_returns)
             logger.info(f"HMM regime detector fitted on {len(spy_returns)} days of SPY returns")
@@ -1422,7 +1426,9 @@ def main():
                             AlertSeverity.CRITICAL,
                         )
                         var_prices = {
-                            p.symbol: p.current_price for p in positions if p.current_price > 0
+                            p.symbol: p.market_value / p.qty
+                            for p in positions
+                            if p.qty > 0 and p.market_value > 0
                         }
                         bridge.reconcile_target_weights(
                             target_weights=scaled.to_dict(),
@@ -1458,7 +1464,10 @@ def main():
 
                         spy_recent = yf.download("SPY", period="3mo", interval="1d", progress=False)
                         if spy_recent is not None and len(spy_recent) > 25:
-                            spy_rets = spy_recent["Close"].pct_change().dropna()
+                            spy_close = spy_recent["Close"]
+                            if hasattr(spy_close, "columns"):
+                                spy_close = spy_close.squeeze()
+                            spy_rets = spy_close.pct_change().dropna()
                             hmm_state = hmm_detector.predict_regime(spy_rets)
                             logger.info(f"HMM regime: {hmm_state.message}")
                     except Exception as e:
