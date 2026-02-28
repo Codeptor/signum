@@ -34,6 +34,7 @@ import {
   Table,
   TableBody,
   TableCell,
+  TableFooter,
   TableHead,
   TableHeader,
   TableRow,
@@ -95,6 +96,140 @@ function regimeColor(regime: string | undefined): string {
   }
 }
 
+const STARTING_EQUITY = 100_000;
+
+function notify(message: string) {
+  if (typeof window === "undefined") return;
+  if ("Notification" in window && Notification.permission === "granted") {
+    new Notification("Signum", { body: message });
+  } else if ("Notification" in window && Notification.permission !== "denied") {
+    Notification.requestPermission().then((perm) => {
+      if (perm === "granted") new Notification("Signum", { body: message });
+    });
+  }
+}
+
+function fmtTz(date: Date, tz: string, label: string): string {
+  return `${label} ${date.toLocaleTimeString("en-US", {
+    timeZone: tz,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  })}`;
+}
+
+type MarketSession = "Pre-market" | "Open" | "After-hours" | "Closed";
+
+function getMarketStatus(now: Date): {
+  session: MarketSession;
+  countdown: string;
+} {
+  const ny = new Date(
+    now.toLocaleString("en-US", { timeZone: "America/New_York" })
+  );
+  const day = ny.getDay();
+  const h = ny.getHours();
+  const m = ny.getMinutes();
+  const mins = h * 60 + m;
+
+  const isWeekday = day >= 1 && day <= 5;
+
+  // Market hours in minutes: pre 4:00-9:30, open 9:30-16:00, after 16:00-20:00
+  const PRE = 240; // 4:00
+  const OPEN = 570; // 9:30
+  const CLOSE = 960; // 16:00
+  const AFTER = 1200; // 20:00
+
+  let session: MarketSession = "Closed";
+  let targetMins = OPEN; // default: next open
+  let targetDay = ny;
+
+  if (isWeekday) {
+    if (mins >= OPEN && mins < CLOSE) {
+      session = "Open";
+      targetMins = CLOSE;
+    } else if (mins >= PRE && mins < OPEN) {
+      session = "Pre-market";
+      targetMins = OPEN;
+    } else if (mins >= CLOSE && mins < AFTER) {
+      session = "After-hours";
+      // Next open is tomorrow (or Monday)
+      targetMins = OPEN;
+      targetDay = new Date(ny);
+      targetDay.setDate(targetDay.getDate() + (day === 5 ? 3 : 1));
+    } else {
+      session = "Closed";
+      if (mins >= AFTER) {
+        targetDay = new Date(ny);
+        targetDay.setDate(targetDay.getDate() + (day === 5 ? 3 : 1));
+      }
+      targetMins = OPEN;
+    }
+  } else {
+    // Weekend
+    const daysToMon = day === 0 ? 1 : 6 - day + 2;
+    targetDay = new Date(ny);
+    targetDay.setDate(targetDay.getDate() + daysToMon);
+    targetMins = OPEN;
+  }
+
+  // Calculate countdown
+  let diffMs: number;
+  if (session === "Open") {
+    // Time until close
+    const targetDate = new Date(ny);
+    targetDate.setHours(Math.floor(targetMins / 60), targetMins % 60, 0, 0);
+    diffMs = targetDate.getTime() - ny.getTime();
+  } else {
+    // Time until next open
+    const targetDate = new Date(targetDay);
+    targetDate.setHours(
+      Math.floor(targetMins / 60),
+      targetMins % 60,
+      0,
+      0
+    );
+    if (session !== "Closed" || isWeekday) {
+      // Same day target
+      if (session === "Pre-market") {
+        const t = new Date(ny);
+        t.setHours(Math.floor(OPEN / 60), OPEN % 60, 0, 0);
+        diffMs = t.getTime() - ny.getTime();
+      } else {
+        diffMs = targetDate.getTime() - ny.getTime();
+      }
+    } else {
+      diffMs = targetDate.getTime() - ny.getTime();
+    }
+  }
+
+  if (diffMs < 0) diffMs = 0;
+  const totalSec = Math.floor(diffMs / 1000);
+  const hours = Math.floor(totalSec / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  const seconds = totalSec % 60;
+
+  const countdown =
+    hours > 0
+      ? `${hours}h ${String(minutes).padStart(2, "0")}m ${String(seconds).padStart(2, "0")}s`
+      : `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+
+  return { session, countdown };
+}
+
+function sessionColor(session: MarketSession): string {
+  switch (session) {
+    case "Open":
+      return "outline";
+    case "Pre-market":
+    case "After-hours":
+      return "secondary";
+    case "Closed":
+      return "destructive";
+  }
+}
+
 // ── Main Page ────────────────────────────────────────────────────────────
 
 export default function DashboardPage() {
@@ -109,6 +244,25 @@ export default function DashboardPage() {
   const [healthy, setHealthy] = React.useState<boolean | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [lastRefresh, setLastRefresh] = React.useState<Date>(new Date());
+  const [now, setNow] = React.useState<Date>(new Date());
+  const [refreshIn, setRefreshIn] = React.useState(30);
+  const [prevRegimeA, setPrevRegimeA] = React.useState<string | null>(null);
+  const [prevRegimeB, setPrevRegimeB] = React.useState<string | null>(null);
+
+  // 1-second clock tick + refresh countdown
+  React.useEffect(() => {
+    const tick = setInterval(() => {
+      setNow(new Date());
+      setRefreshIn((prev) => (prev <= 1 ? 30 : prev - 1));
+    }, 1000);
+    // Request notification permission
+    if ("Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission();
+    }
+    return () => clearInterval(tick);
+  }, []);
+
+  const market = getMarketStatus(now);
 
   // Comparison strip data (always both bots)
   const [statusA, setStatusA] = React.useState<StatusData | null>(null);
@@ -123,11 +277,34 @@ export default function DashboardPage() {
       fetchHealth("bot-a"),
       fetchHealth("bot-b"),
     ]);
+
+    // Regime change notifications
+    const regimeA = sA?.regime?.regime;
+    const regimeB = sB?.regime?.regime;
+    if (
+      prevRegimeA &&
+      regimeA &&
+      regimeA !== prevRegimeA &&
+      regimeA !== "normal"
+    ) {
+      notify(`Bot A regime: ${regimeA.toUpperCase()}`);
+    }
+    if (
+      prevRegimeB &&
+      regimeB &&
+      regimeB !== prevRegimeB &&
+      regimeB !== "normal"
+    ) {
+      notify(`Bot B regime: ${regimeB.toUpperCase()}`);
+    }
+    if (regimeA) setPrevRegimeA(regimeA);
+    if (regimeB) setPrevRegimeB(regimeB);
+
     setStatusA(sA);
     setStatusB(sB);
     setHealthA(hA != null);
     setHealthB(hB != null);
-  }, []);
+  }, [prevRegimeA, prevRegimeB]);
 
   const loadBot = React.useCallback(async (b: BotId) => {
     setLoading(true);
@@ -151,6 +328,7 @@ export default function DashboardPage() {
     setHealthy(h != null);
     setLoading(false);
     setLastRefresh(new Date());
+    setRefreshIn(30);
   }, []);
 
   React.useEffect(() => {
@@ -170,13 +348,25 @@ export default function DashboardPage() {
   return (
     <div className="min-h-screen bg-background text-foreground">
       {/* ── Header ─────────────────────────────────────────────────── */}
-      <header className="border-b border-border px-6 py-4">
+      <header className="border-b border-border px-6 py-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
             <h1 className="text-sm font-semibold tracking-tight">SIGNUM</h1>
             <Separator orientation="vertical" className="h-4" />
-            <span className="text-xs text-muted-foreground">
-              Quantitative Equity Trading
+            <Badge
+              variant={
+                sessionColor(market.session) as
+                  | "outline"
+                  | "secondary"
+                  | "destructive"
+              }
+            >
+              {market.session}
+            </Badge>
+            <span className="text-xs tabular-nums text-muted-foreground">
+              {market.session === "Open"
+                ? `Closes in ${market.countdown}`
+                : `Opens in ${market.countdown}`}
             </span>
           </div>
           <div className="flex items-center gap-4">
@@ -187,8 +377,14 @@ export default function DashboardPage() {
               </TabsList>
             </Tabs>
             <Separator orientation="vertical" className="h-4" />
-            <span className="text-xs text-muted-foreground">
-              {lastRefresh.toLocaleTimeString()}
+            <div className="flex items-center gap-3 text-[10px] tabular-nums text-muted-foreground">
+              <span>{fmtTz(now, "America/New_York", "NY")}</span>
+              <span>{fmtTz(now, "Asia/Kolkata", "IST")}</span>
+              <span>{fmtTz(now, "UTC", "UTC")}</span>
+            </div>
+            <Separator orientation="vertical" className="h-4" />
+            <span className="text-[10px] tabular-nums text-muted-foreground">
+              {refreshIn}s
             </span>
           </div>
         </div>
@@ -421,6 +617,42 @@ export default function DashboardPage() {
                     </TableRow>
                   ))}
                 </TableBody>
+                <TableFooter>
+                  <TableRow>
+                    <TableCell className="font-medium">Total</TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {positions.reduce((s, p) => s + (p.qty ?? 0), 0)}
+                    </TableCell>
+                    <TableCell />
+                    <TableCell />
+                    <TableCell className="text-right tabular-nums font-medium">
+                      {fmtUsd(
+                        positions.reduce(
+                          (s, p) => s + (p.market_value ?? 0),
+                          0
+                        )
+                      )}
+                    </TableCell>
+                    <TableCell
+                      className={`text-right tabular-nums font-medium ${
+                        positions.reduce(
+                          (s, p) => s + (p.unrealized_pl ?? 0),
+                          0
+                        ) >= 0
+                          ? "text-green-500"
+                          : "text-red-500"
+                      }`}
+                    >
+                      {fmtUsd(
+                        positions.reduce(
+                          (s, p) => s + (p.unrealized_pl ?? 0),
+                          0
+                        )
+                      )}
+                    </TableCell>
+                    <TableCell />
+                  </TableRow>
+                </TableFooter>
               </Table>
             ) : (
               <p className="py-8 text-center text-xs text-muted-foreground">
@@ -568,9 +800,30 @@ function ComparisonCard({
             <p className="text-lg font-semibold tabular-nums">
               {fmtUsd(status?.account?.equity)}
             </p>
-            <p className="text-xs text-muted-foreground">
-              {status?.positions_count ?? 0} positions
-            </p>
+            <div className="flex items-center gap-2">
+              <p className="text-xs text-muted-foreground">
+                {status?.positions_count ?? 0} positions
+              </p>
+              {status?.account?.equity != null && (
+                <span
+                  className={`text-xs font-medium tabular-nums ${
+                    status.account.equity >= STARTING_EQUITY
+                      ? "text-green-500"
+                      : "text-red-500"
+                  }`}
+                >
+                  {status.account.equity >= STARTING_EQUITY ? "+" : ""}
+                  {fmtUsd(status.account.equity - STARTING_EQUITY)} (
+                  {status.account.equity >= STARTING_EQUITY ? "+" : ""}
+                  {fmt(
+                    ((status.account.equity - STARTING_EQUITY) /
+                      STARTING_EQUITY) *
+                      100
+                  )}
+                  %)
+                </span>
+              )}
+            </div>
           </div>
           <div className="text-right text-xs text-muted-foreground">
             <p>VIX: {fmt(status?.regime?.vix, 1)}</p>
