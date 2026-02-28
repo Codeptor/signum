@@ -98,6 +98,46 @@ function regimeColor(regime: string | undefined): string {
 
 const STARTING_EQUITY = 100_000;
 
+// S&P 500 sector map (top holdings — covers most likely positions)
+const SECTOR_MAP: Record<string, string> = {
+  AAPL: "Technology", MSFT: "Technology", NVDA: "Technology", GOOG: "Technology",
+  GOOGL: "Technology", META: "Technology", AVGO: "Technology", ADBE: "Technology",
+  CRM: "Technology", CSCO: "Technology", ORCL: "Technology", ACN: "Technology",
+  AMD: "Technology", INTC: "Technology", IBM: "Technology", QCOM: "Technology",
+  TXN: "Technology", NOW: "Technology", AMAT: "Technology", MU: "Technology",
+  INTU: "Technology", LRCX: "Technology", KLAC: "Technology", SNPS: "Technology",
+  CDNS: "Technology", MRVL: "Technology", FTNT: "Technology", PANW: "Technology",
+  AMZN: "Consumer Disc.", TSLA: "Consumer Disc.", HD: "Consumer Disc.",
+  MCD: "Consumer Disc.", NKE: "Consumer Disc.", LOW: "Consumer Disc.",
+  SBUX: "Consumer Disc.", TJX: "Consumer Disc.", BKNG: "Consumer Disc.",
+  CMG: "Consumer Disc.", ORLY: "Consumer Disc.", MAR: "Consumer Disc.",
+  BRK: "Financials", JPM: "Financials", V: "Financials", MA: "Financials",
+  BAC: "Financials", WFC: "Financials", GS: "Financials", MS: "Financials",
+  SPGI: "Financials", BLK: "Financials", AXP: "Financials", C: "Financials",
+  SCHW: "Financials", CB: "Financials", MMC: "Financials", PGR: "Financials",
+  UNH: "Healthcare", JNJ: "Healthcare", LLY: "Healthcare", ABBV: "Healthcare",
+  MRK: "Healthcare", PFE: "Healthcare", TMO: "Healthcare", ABT: "Healthcare",
+  DHR: "Healthcare", BMY: "Healthcare", AMGN: "Healthcare", GILD: "Healthcare",
+  ISRG: "Healthcare", VRTX: "Healthcare", SYK: "Healthcare", BSX: "Healthcare",
+  MDT: "Healthcare", REGN: "Healthcare", ZTS: "Healthcare", ELV: "Healthcare",
+  XOM: "Energy", CVX: "Energy", COP: "Energy", SLB: "Energy", EOG: "Energy",
+  MPC: "Energy", PSX: "Energy", VLO: "Energy", OXY: "Energy", HES: "Energy",
+  PG: "Consumer Stap.", KO: "Consumer Stap.", PEP: "Consumer Stap.",
+  COST: "Consumer Stap.", WMT: "Consumer Stap.", PM: "Consumer Stap.",
+  MO: "Consumer Stap.", CL: "Consumer Stap.", MDLZ: "Consumer Stap.",
+  LIN: "Materials", APD: "Materials", SHW: "Materials", ECL: "Materials",
+  FCX: "Materials", NEM: "Materials", NUE: "Materials", DOW: "Materials",
+  NEE: "Utilities", DUK: "Utilities", SO: "Utilities", D: "Utilities",
+  AEP: "Utilities", SRE: "Utilities", EXC: "Utilities", XEL: "Utilities",
+  AMT: "Real Estate", PLD: "Real Estate", CCI: "Real Estate",
+  EQIX: "Real Estate", SPG: "Real Estate", PSA: "Real Estate",
+  UNP: "Industrials", RTX: "Industrials", HON: "Industrials", UPS: "Industrials",
+  BA: "Industrials", CAT: "Industrials", DE: "Industrials", LMT: "Industrials",
+  GE: "Industrials", MMM: "Industrials", GD: "Industrials", NOC: "Industrials",
+  T: "Communication", VZ: "Communication", TMUS: "Communication",
+  DIS: "Communication", CMCSA: "Communication", NFLX: "Communication",
+};
+
 function notify(message: string) {
   if (typeof window === "undefined") return;
   if ("Notification" in window && Notification.permission === "granted") {
@@ -248,6 +288,16 @@ export default function DashboardPage() {
   const [refreshIn, setRefreshIn] = React.useState(30);
   const [prevRegimeA, setPrevRegimeA] = React.useState<string | null>(null);
   const [prevRegimeB, setPrevRegimeB] = React.useState<string | null>(null);
+  const [equityA, setEquityA] = React.useState<EquityPoint[]>([]);
+  const [equityB, setEquityB] = React.useState<EquityPoint[]>([]);
+  const [paused, setPaused] = React.useState(false);
+
+  // Dynamic page title
+  React.useEffect(() => {
+    const eq = status?.account?.equity;
+    const label = bot === "bot-a" ? "A" : "B";
+    document.title = eq != null ? `${fmtUsd(eq)} (${label}) | Signum` : "Signum";
+  }, [status, bot]);
 
   // 1-second clock tick + refresh countdown
   React.useEffect(() => {
@@ -331,15 +381,54 @@ export default function DashboardPage() {
     setRefreshIn(30);
   }, []);
 
+  const loadEquityCurves = React.useCallback(async () => {
+    const [eA, eB] = await Promise.all([
+      fetchEquity("bot-a"),
+      fetchEquity("bot-b"),
+    ]);
+    setEquityA(eA);
+    setEquityB(eB);
+  }, []);
+
+  // Keyboard shortcuts
+  React.useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      switch (e.key) {
+        case "1":
+          setBot("bot-a");
+          break;
+        case "2":
+          setBot("bot-b");
+          break;
+        case "r":
+        case "R":
+          loadComparison();
+          loadBot(bot);
+          break;
+        case " ":
+          e.preventDefault();
+          setPaused((p) => !p);
+          break;
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [bot, loadComparison, loadBot]);
+
   React.useEffect(() => {
     loadComparison();
     loadBot(bot);
+    loadEquityCurves();
     const interval = setInterval(() => {
-      loadComparison();
-      loadBot(bot);
+      if (!paused) {
+        loadComparison();
+        loadBot(bot);
+        loadEquityCurves();
+      }
     }, 30000);
     return () => clearInterval(interval);
-  }, [bot, loadBot, loadComparison]);
+  }, [bot, paused, loadBot, loadComparison, loadEquityCurves]);
 
   const switchBot = (b: string) => {
     if (b === "bot-a" || b === "bot-b") setBot(b as BotId);
@@ -510,12 +599,23 @@ export default function DashboardPage() {
         <div className="grid grid-cols-4 gap-4">
           <Card className="col-span-3">
             <CardHeader>
-              <CardTitle>Equity Curve</CardTitle>
-              <CardDescription>Portfolio value over time</CardDescription>
+              <div className="flex items-center justify-between">
+                <div>
+                  <CardTitle>Equity Curve</CardTitle>
+                  <CardDescription>
+                    Bot A vs Bot B — portfolio value over time
+                  </CardDescription>
+                </div>
+                {paused && (
+                  <Badge variant="secondary" className="text-[10px]">
+                    PAUSED
+                  </Badge>
+                )}
+              </div>
             </CardHeader>
             <CardContent>
-              {equity.length > 0 ? (
-                <EquityChart data={equity} />
+              {equityA.length > 0 || equityB.length > 0 ? (
+                <DualEquityChart dataA={equityA} dataB={equityB} />
               ) : (
                 <div className="flex h-72 items-center justify-center text-xs text-muted-foreground">
                   No equity data yet — first trade on March 4th
@@ -557,6 +657,19 @@ export default function DashboardPage() {
             </CardContent>
           </Card>
         </div>
+
+        {/* ── Sector Exposure ──────────────────────────────────── */}
+        {positions.length > 0 && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Sector Exposure</CardTitle>
+              <CardDescription>Portfolio weight by sector</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <SectorBreakdown positions={positions} />
+            </CardContent>
+          </Card>
+        )}
 
         {/* ── Positions Table ──────────────────────────────────── */}
         <Card>
@@ -844,28 +957,51 @@ function MetricRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-const equityChartConfig = {
-  equity: {
-    label: "Equity",
+const dualEquityChartConfig = {
+  botA: {
+    label: "Bot A",
+    color: "var(--foreground)",
+  },
+  botB: {
+    label: "Bot B",
     color: "var(--foreground)",
   },
 } satisfies ChartConfig;
 
-function EquityChart({ data }: { data: EquityPoint[] }) {
-  const chartData = data.map((d) => ({
-    date: fmtDate(d.timestamp),
-    equity: d.equity,
-  }));
+function DualEquityChart({
+  dataA,
+  dataB,
+}: {
+  dataA: EquityPoint[];
+  dataB: EquityPoint[];
+}) {
+  // Merge both series by date into a single array
+  const dateMap = new Map<string, { date: string; botA?: number; botB?: number }>();
+  for (const d of dataA) {
+    const key = d.timestamp.slice(0, 10); // YYYY-MM-DD
+    const existing = dateMap.get(key) || { date: key };
+    existing.botA = d.equity;
+    dateMap.set(key, existing);
+  }
+  for (const d of dataB) {
+    const key = d.timestamp.slice(0, 10);
+    const existing = dateMap.get(key) || { date: key };
+    existing.botB = d.equity;
+    dateMap.set(key, existing);
+  }
+  const chartData = Array.from(dateMap.values()).sort((a, b) =>
+    a.date.localeCompare(b.date)
+  );
 
   return (
-    <ChartContainer config={equityChartConfig} className="h-72 w-full">
+    <ChartContainer config={dualEquityChartConfig} className="h-72 w-full">
       <AreaChart data={chartData}>
         <defs>
-          <linearGradient id="equityGradient" x1="0" y1="0" x2="0" y2="1">
+          <linearGradient id="gradientA" x1="0" y1="0" x2="0" y2="1">
             <stop
               offset="0%"
               stopColor="var(--foreground)"
-              stopOpacity={0.15}
+              stopOpacity={0.12}
             />
             <stop
               offset="100%"
@@ -878,7 +1014,10 @@ function EquityChart({ data }: { data: EquityPoint[] }) {
           dataKey="date"
           tickLine={false}
           axisLine={false}
-          tickFormatter={(v) => v}
+          tickFormatter={(v: string) => {
+            const parts = v.split("-");
+            return `${parts[1]}/${parts[2]}`;
+          }}
           fontSize={10}
         />
         <YAxis
@@ -888,15 +1027,75 @@ function EquityChart({ data }: { data: EquityPoint[] }) {
           fontSize={10}
           width={50}
         />
-        <ChartTooltip content={<ChartTooltipContent />} />
+        <ChartTooltip
+          content={
+            <ChartTooltipContent
+              formatter={(value, name) => (
+                <span className="tabular-nums">
+                  {String(name) === "botA" ? "A" : "B"}: {fmtUsd(Number(value))}
+                </span>
+              )}
+            />
+          }
+        />
         <Area
           type="monotone"
-          dataKey="equity"
+          dataKey="botA"
           stroke="var(--foreground)"
           strokeWidth={1.5}
-          fill="url(#equityGradient)"
+          fill="url(#gradientA)"
+          connectNulls
+        />
+        <Area
+          type="monotone"
+          dataKey="botB"
+          stroke="var(--foreground)"
+          strokeWidth={1.5}
+          strokeDasharray="4 3"
+          fill="none"
+          connectNulls
         />
       </AreaChart>
     </ChartContainer>
+  );
+}
+
+// Sector exposure breakdown — horizontal bar using plain divs
+function SectorBreakdown({ positions }: { positions: Position[] }) {
+  const totalValue = positions.reduce((s, p) => s + Math.abs(p.market_value ?? 0), 0);
+  if (totalValue === 0) return null;
+
+  // Group by sector
+  const sectorWeights = new Map<string, number>();
+  for (const p of positions) {
+    const sector = SECTOR_MAP[p.symbol] || "Other";
+    sectorWeights.set(
+      sector,
+      (sectorWeights.get(sector) || 0) + Math.abs(p.market_value ?? 0)
+    );
+  }
+
+  // Sort descending by weight
+  const sorted = Array.from(sectorWeights.entries())
+    .map(([sector, value]) => ({ sector, weight: value / totalValue }))
+    .sort((a, b) => b.weight - a.weight);
+
+  return (
+    <div className="space-y-2">
+      {sorted.map(({ sector, weight }) => (
+        <div key={sector} className="flex items-center gap-3 text-xs">
+          <span className="w-28 shrink-0 text-muted-foreground">{sector}</span>
+          <div className="flex-1 h-2 bg-muted overflow-hidden">
+            <div
+              className="h-full bg-foreground/70"
+              style={{ width: `${(weight * 100).toFixed(1)}%` }}
+            />
+          </div>
+          <span className="w-12 text-right tabular-nums font-medium">
+            {(weight * 100).toFixed(1)}%
+          </span>
+        </div>
+      ))}
+    </div>
   );
 }

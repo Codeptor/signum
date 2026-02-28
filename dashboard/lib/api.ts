@@ -18,8 +18,12 @@ export async function fetchStatus(bot: BotId) {
   return fetchBot<StatusData>(bot, "api/status");
 }
 
-export async function fetchPositions(bot: BotId) {
-  return fetchBot<Position[]>(bot, "api/positions");
+export async function fetchPositions(bot: BotId): Promise<Position[]> {
+  const data = await fetchBot<{ positions: Position[] } | Position[]>(bot, "api/positions");
+  if (!data) return [];
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data.positions)) return data.positions;
+  return [];
 }
 
 export async function fetchRisk(bot: BotId) {
@@ -34,8 +38,13 @@ export async function fetchDrift(bot: BotId) {
   return fetchBot<DriftData>(bot, "api/drift");
 }
 
-export async function fetchEquity(bot: BotId) {
-  return fetchBot<EquityPoint[]>(bot, "api/equity");
+export async function fetchEquity(bot: BotId): Promise<EquityPoint[]> {
+  const data = await fetchBot<EquityPoint[] | { equity: EquityPoint[] } | { records: EquityPoint[] }>(bot, "api/equity");
+  if (!data) return [];
+  if (Array.isArray(data)) return data;
+  if ("equity" in data && Array.isArray(data.equity)) return data.equity;
+  if ("records" in data && Array.isArray(data.records)) return data.records;
+  return [];
 }
 
 export async function fetchHealth(bot: BotId) {
