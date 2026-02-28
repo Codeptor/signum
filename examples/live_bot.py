@@ -869,6 +869,10 @@ def run_trading_cycle(
                 time_in_force="day",
             )
 
+            # Capture decision price at submission time (before market impact)
+            # for accurate TCA implementation shortfall calculation.
+            decision_price = prices.get(symbol)
+
             order_id = broker.submit_order(broker_order)
             submitted_orders.append(
                 {
@@ -877,6 +881,7 @@ def run_trading_cycle(
                     "side": side,
                     "qty": qty,
                     "needs_sl_tp": side == "buy",
+                    "decision_price": decision_price,
                 }
             )
             logger.info(f"  Submitted: {side.upper()} {qty:.4f} {symbol} -> Order ID: {order_id}")
@@ -1077,14 +1082,16 @@ def run_trading_cycle(
             try:
                 order_info = broker.get_order(entry["order_id"])
                 if order_info and order_info.filled_avg_price:
-                    decision_price = prices.get(entry["symbol"], order_info.filled_avg_price)
+                    # Use pre-submission decision price (captured at order time)
+                    # for accurate implementation shortfall measurement.
+                    dp = entry.get("decision_price") or order_info.filled_avg_price
                     tca_analyzer.add_trade(TradeRecord(
                         symbol=entry["symbol"],
                         side=entry["side"].upper(),
                         order_qty=entry["qty"],
                         fill_qty=float(order_info.filled_qty or 0),
                         fill_price=float(order_info.filled_avg_price),
-                        decision_price=float(decision_price),
+                        decision_price=float(dp),
                         timestamp=datetime.now(tz=ZoneInfo("America/New_York")),
                     ))
             except Exception as e:
@@ -1097,6 +1104,19 @@ def run_trading_cycle(
                 f"mean IS={tca_summary.get('mean_is_bps', 0):.1f}bps, "
                 f"mean fill rate={tca_summary.get('mean_fill_rate', 0):.1%}"
             )
+            # Persist TCA trades for recovery across restarts
+            try:
+                tca_analyzer.save(Path("data/cache/tca_trades.json"))
+            except Exception as e:
+                logger.debug(f"TCA save failed: {e}")
+            # Persist TCA report for /tca Telegram command
+            try:
+                tca_report_path = Path("data/cache/tca_report.json")
+                tca_report_path.parent.mkdir(parents=True, exist_ok=True)
+                import json as _json
+                tca_report_path.write_text(_json.dumps(tca_analyzer.to_json(), indent=2, default=str))
+            except Exception as e:
+                logger.debug(f"TCA report save failed: {e}")
 
     # Send trade summary alert (email + webhook)
     account = broker.get_account()
@@ -1252,8 +1272,9 @@ def main():
     except Exception as e:
         logger.warning(f"HMM regime detector init failed: {e} — using threshold fallback")
 
-    # Initialize TCA analyzer for execution quality tracking
-    tca_analyzer = TransactionCostAnalyzer()
+    # Initialize TCA analyzer — load previous trades from disk if available
+    TCA_TRADES_FILE = Path("data/cache/tca_trades.json")
+    tca_analyzer = TransactionCostAnalyzer.load(TCA_TRADES_FILE)
 
     # Initialize risk engine with current positions' historical data
     _initialize_risk_engine(broker, risk_manager)
@@ -1409,9 +1430,22 @@ def main():
 
                     # Use HMM regime if available, otherwise threshold
                     if hmm_state is not None:
-                        # Map HMM to RegimeState for compatibility with run_trading_cycle
-                        hmm_regime_map = {"low_vol": "normal", "normal": "caution", "high_vol": "halt"}
+                        # Map HMM states to RegimeState regimes.
+                        # HMM exposure multipliers: low_vol=1.0, normal=0.7, high_vol=0.3
+                        # Only escalate to "halt" when BOTH HMM says high_vol AND
+                        # threshold detector also says halt (consensus required for
+                        # the most drastic action — full liquidation).
+                        hmm_regime_map = {
+                            "low_vol": "normal",
+                            "normal": "normal",
+                            "high_vol": "caution",
+                        }
                         mapped_regime = hmm_regime_map.get(hmm_state.regime, "caution")
+
+                        # Escalate to halt only when both HMM and threshold agree
+                        if hmm_state.regime == "high_vol" and threshold_state.regime == "halt":
+                            mapped_regime = "halt"
+
                         regime_state = RegimeState(
                             regime=mapped_regime,
                             vix=vix,
