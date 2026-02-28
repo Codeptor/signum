@@ -23,7 +23,7 @@ Signum is an automated quantitative equity trading bot. It trains a **LightGBM +
 examples/live_bot.py          Entry point — runs weekly on Wednesdays
     │
     ├── python/data/ingestion.py       Scrape S&P 500 tickers, fetch 2yr OHLCV
-    ├── python/alpha/features.py       27 alpha features + winsorization + volatility estimators
+    ├── python/alpha/features.py       27 computed features (11 active in reduced set) + winsorization + volatility estimators
     ├── python/alpha/model.py          LightGBM (Huber loss) wrapper
     ├── python/alpha/ensemble.py       LightGBM + CatBoost + RF + Ridge stacking meta-learner
     ├── python/alpha/train.py          Purged walk-forward CV + SHAP + alpha decay + MLflow
@@ -55,7 +55,7 @@ examples/live_bot.py          Entry point — runs weekly on Wednesdays
 | Feature | Bot A (main) | Bot B (this branch) |
 |---------|-------------|-------------------|
 | Model | Single LightGBM | LightGBM + CatBoost + RF + Ridge stacking |
-| Features | 22 alpha features | 27 features (+mom_12_1, mr_zscore_60, vol_yz_20d, vol_park_20d, sector_rel_mom) |
+| Features | 22 alpha features | 27 features (11 active in reduced set: +mom_12_1, mr_zscore_60, vol_yz_20d, sector_rel_mom) |
 | Cross-validation | Date-based split | Purged walk-forward CV (5 folds, 22-day embargo) |
 | Regime detection | VIX/SPY threshold only | HMM (primary) + threshold (fallback, consensus for halt) |
 | Position sizing | HRP weights only | HRP + confidence-weighted blend (70/30) |
