@@ -162,17 +162,20 @@ class TestComputeFeaturesIncludesMacro:
         monkeypatch.setattr(predict_mod, "compute_alpha_features", mock_compute_alpha)
         monkeypatch.setattr(predict_mod, "compute_cross_sectional_features", mock_compute_cross)
 
-        # Mock Path.exists to say macro file exists
-        with patch("python.alpha.predict.Path") as mock_path_cls:
-            mock_path_instance = MagicMock()
-            mock_path_instance.exists.return_value = True
-            mock_path_cls.return_value = mock_path_instance
+        # Mock _PROJECT_ROOT so macro_path.exists() returns True
+        mock_root = MagicMock()
+        mock_macro_path = MagicMock()
+        mock_macro_path.exists.return_value = True
+        mock_root.__truediv__ = MagicMock(return_value=mock_macro_path)
+        mock_macro_path.__truediv__ = MagicMock(return_value=mock_macro_path)
 
-            with patch("python.alpha.features.merge_macro_features") as mock_merge:
-                mock_merge.return_value = mock_compute_cross.return_value
-                predict_mod.compute_features(MagicMock())
+        monkeypatch.setattr(predict_mod, "_PROJECT_ROOT", mock_root)
 
-                mock_merge.assert_called_once()
+        with patch("python.alpha.features.merge_macro_features") as mock_merge:
+            mock_merge.return_value = mock_compute_cross.return_value
+            predict_mod.compute_features(MagicMock())
+
+            mock_merge.assert_called_once()
 
 
 class TestRankStocksFillsMissingFeatures:
