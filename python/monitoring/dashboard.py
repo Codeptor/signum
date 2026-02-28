@@ -60,6 +60,7 @@ def _get_broker():
         _cached_broker.connect()
     return _cached_broker
 
+
 # ═══════════════════════════════════════════════════════════════════
 # Design Tokens
 # ═══════════════════════════════════════════════════════════════════
@@ -1631,7 +1632,12 @@ def register_api_routes(app: dash.Dash) -> None:
             # Read from disk (the ML pipeline writes drift_report.json)
             # instead of importing the module-level var (which is always
             # None in a separate dashboard process).
-            drift_path = Path(__file__).resolve().parent.parent.parent / "data" / "cache" / "drift_report.json"
+            drift_path = (
+                Path(__file__).resolve().parent.parent.parent
+                / "data"
+                / "cache"
+                / "drift_report.json"
+            )
             if not drift_path.exists():
                 return _json_response(
                     {
@@ -1703,20 +1709,18 @@ def register_api_routes(app: dash.Dash) -> None:
     @server.route("/api/tca")
     def api_tca():
         """Transaction cost analysis from persisted trade log."""
-        tca_path = _PROJECT_ROOT / "data" / "cache" / "tca_report.json"
+        tca_path = (
+            Path(__file__).resolve().parent.parent.parent / "data" / "cache" / "tca_report.json"
+        )
         if tca_path.exists():
             try:
                 import json
 
                 with open(tca_path) as f:
                     report = json.load(f)
-                return _json_response(
-                    {"timestamp": datetime.now().isoformat(), **report}
-                )
+                return _json_response({"timestamp": datetime.now().isoformat(), **report})
             except Exception as exc:
-                return _json_response(
-                    {"error": f"Failed to load TCA report: {exc}"}, 500
-                )
+                return _json_response({"error": f"Failed to load TCA report: {exc}"}, 500)
         return _json_response(
             {
                 "timestamp": datetime.now().isoformat(),
