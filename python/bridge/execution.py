@@ -304,10 +304,26 @@ class ExecutionBridge:
             {"timestamp": datetime.now(tz=timezone.utc), "equity": self.equity}
         )
         if len(self.equity_curve) > 10_000:
-            # H-EQCURVE fix: non-overlapping compaction — subsample old, keep recent
-            historical = self.equity_curve[:-1000][::10]
+            # P2-26 fix: preserve local min/max during compaction to maintain
+            # drawdown precision.  The old [::10] subsampling could skip the
+            # exact equity trough, making drawdown calculations optimistic.
+            # New approach: in each 10-point window, keep the min and max.
+            old = self.equity_curve[:-1000]
             recent = self.equity_curve[-1000:]
-            self.equity_curve = historical + recent
+            compacted = []
+            for i in range(0, len(old), 10):
+                window = old[i : i + 10]
+                if not window:
+                    continue
+                # Keep the min and max equity point in each window
+                min_pt = min(window, key=lambda p: p["equity"])
+                max_pt = max(window, key=lambda p: p["equity"])
+                # Add in chronological order
+                if min_pt["timestamp"] <= max_pt["timestamp"]:
+                    compacted.extend([min_pt, max_pt])
+                else:
+                    compacted.extend([max_pt, min_pt])
+            self.equity_curve = compacted + recent
 
     def update_prices(self, prices: Dict[str, float]) -> None:
         """Update positions with current prices."""

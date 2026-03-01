@@ -238,14 +238,42 @@ def _purged_walk_forward_cv(
         )
 
         # SHAP per fold (best-effort)
+        # P1-20 fix: when using an ensemble, compute SHAP for all tree-based
+        # sub-models and average the importance.  Previously only LightGBM was
+        # explained, giving a misleading picture of what drives the ensemble.
         try:
             from python.alpha.explainability import compute_shap_importance
 
-            # Use LightGBM model for SHAP (works for both single and ensemble)
-            shap_model = model.lgbm.model if hasattr(model, "lgbm") else model.model
-            if shap_model is not None:
-                shap_df = compute_shap_importance(shap_model, test_fold[feature_cols], feature_cols)
-                fold_shap_dfs.append(shap_df)
+            if hasattr(model, "lgbm") and hasattr(model, "rf"):
+                # Ensemble: aggregate SHAP from all tree-based sub-models
+                sub_shap_dfs = []
+                # LightGBM (weight 0.45)
+                lgbm_model = model.lgbm.model
+                if lgbm_model is not None:
+                    sub_shap_dfs.append(
+                        compute_shap_importance(lgbm_model, test_fold[feature_cols], feature_cols)
+                    )
+                # Random Forest (weight 0.25)
+                if model.rf is not None:
+                    try:
+                        sub_shap_dfs.append(
+                            compute_shap_importance(model.rf, test_fold[feature_cols], feature_cols)
+                        )
+                    except Exception:
+                        pass  # RF SHAP can fail on large forests
+                if sub_shap_dfs:
+                    # Average importance across sub-models
+                    combined = pd.concat(sub_shap_dfs)
+                    shap_df = combined.groupby(combined.index).mean()
+                    fold_shap_dfs.append(shap_df)
+            else:
+                # Single model
+                shap_model = model.model if hasattr(model, "model") else None
+                if shap_model is not None:
+                    shap_df = compute_shap_importance(
+                        shap_model, test_fold[feature_cols], feature_cols
+                    )
+                    fold_shap_dfs.append(shap_df)
         except Exception as e:
             logger.debug(f"SHAP failed for fold {fold}: {e}")
 

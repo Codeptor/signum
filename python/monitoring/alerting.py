@@ -464,11 +464,14 @@ def send_alert(
         else:
             subject = f"{prefix} {subject}"
 
-        # Telegram (synchronous — fast at ~100-300ms via HTTPS)
-        _send_telegram(message, severity)
+        # P1-22 fix: run Telegram and webhook in background threads to avoid
+        # blocking the trading loop. Telegram API calls can take 100-2000ms
+        # during network congestion or Telegram outages; blocking the main
+        # thread during a weekly rebalance could cause order timeouts.
+        import threading as _threading
 
-        # Webhook (synchronous — fast enough at ~100ms)
-        _send_webhook(message)
+        _threading.Thread(target=_send_telegram, args=(message, severity), daemon=True).start()
+        _threading.Thread(target=_send_webhook, args=(message,), daemon=True).start()
 
         # Email (background thread to avoid blocking trading logic)
         if _is_email_configured():

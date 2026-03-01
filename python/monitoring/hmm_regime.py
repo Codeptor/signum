@@ -74,6 +74,9 @@ class HMMRegimeDetector:
     _model: Optional[GaussianHMM] = field(default=None, init=False, repr=False)
     _state_order: Optional[list[int]] = field(default=None, init=False, repr=False)
     _fitted: bool = field(default=False, init=False)
+    # P1-14: track last fit time to support periodic refitting
+    _last_fit_time: Optional[pd.Timestamp] = field(default=None, init=False, repr=False)
+    refit_interval_days: int = 30  # Refit HMM monthly
 
     def _build_features(self, returns: pd.Series) -> np.ndarray:
         """Build feature matrix from a returns series.
@@ -92,11 +95,13 @@ class HMMRegimeDetector:
         vol_5 = returns.rolling(5, min_periods=2).std() * np.sqrt(252)
         vol_20 = returns.rolling(20, min_periods=5).std() * np.sqrt(252)
 
-        features = pd.DataFrame({
-            "ret": returns,
-            "vol_5": vol_5,
-            "vol_20": vol_20,
-        }).dropna()
+        features = pd.DataFrame(
+            {
+                "ret": returns,
+                "vol_5": vol_5,
+                "vol_20": vol_20,
+            }
+        ).dropna()
 
         return features.values
 
@@ -132,11 +137,26 @@ class HMMRegimeDetector:
         self._state_order = list(np.argsort(mean_vol))  # low→high vol
 
         self._fitted = True
+        self._last_fit_time = pd.Timestamp.now(tz="UTC")  # P1-14: track fit time
         logger.info(
             f"HMM fitted: {self.n_states} states, "
             f"mean vol = {[f'{mean_vol[s]:.2f}' for s in self._state_order]}"
         )
         return self
+
+    def needs_refit(self) -> bool:
+        """Check if the HMM should be refitted based on the refit interval.
+
+        P1-14 fix: HMM parameters drift as market structure evolves.
+        Without periodic refitting, the model can become stale — e.g.
+        a regime shift from 2024 would still be using 2023 volatility
+        clusters.  Monthly refitting (default 30 days) keeps the model
+        current while avoiding overfitting to recent data.
+        """
+        if not self._fitted or self._last_fit_time is None:
+            return True
+        elapsed = pd.Timestamp.now(tz="UTC") - self._last_fit_time
+        return elapsed.days >= self.refit_interval_days
 
     def _map_state(self, raw_state: int) -> tuple[int, str]:
         """Map raw HMM state to ordered regime index and label."""
@@ -165,7 +185,7 @@ class HMMRegimeDetector:
 
         # Map to ordered labels
         records = []
-        feature_dates = returns.dropna().index[-len(X):]
+        feature_dates = returns.dropna().index[-len(X) :]
         for i, (date, raw_s) in enumerate(zip(feature_dates, raw_states)):
             ordered_idx, label = self._map_state(raw_s)
             prob_dict = {}
@@ -173,12 +193,14 @@ class HMMRegimeDetector:
                 _, j_label = self._map_state(j)
                 prob_dict[j_label] = float(probs[i, j])
 
-            records.append({
-                "date": date,
-                "regime_id": ordered_idx,
-                "regime": label,
-                **{f"prob_{k}": v for k, v in prob_dict.items()},
-            })
+            records.append(
+                {
+                    "date": date,
+                    "regime_id": ordered_idx,
+                    "regime": label,
+                    **{f"prob_{k}": v for k, v in prob_dict.items()},
+                }
+            )
 
         return pd.DataFrame(records)
 
@@ -223,8 +245,7 @@ class HMMRegimeDetector:
             probabilities=prob_dict,
             exposure_multiplier=exposure,
             message=(
-                f"HMM regime: {label} "
-                f"(P={prob_dict.get(label, 0):.1%}, exposure={exposure:.0%})"
+                f"HMM regime: {label} (P={prob_dict.get(label, 0):.1%}, exposure={exposure:.0%})"
             ),
         )
 
@@ -256,11 +277,7 @@ class HMMRegimeDetector:
         for _, row in hmm_df.iterrows():
             date = row["date"]
             vix = vix_series.get(date, 20.0) if date in vix_series.index else 20.0
-            dd = (
-                spy_drawdown_series.get(date, 0.0)
-                if date in spy_drawdown_series.index
-                else 0.0
-            )
+            dd = spy_drawdown_series.get(date, 0.0) if date in spy_drawdown_series.index else 0.0
             threshold_regimes.append(threshold_det.get_regime(vix, dd))
 
         hmm_df["threshold_regime"] = threshold_regimes

@@ -1408,8 +1408,15 @@ def _read_log_tail(n_lines: int = 80) -> str:
     return "No log file found. Bot may not have started yet."
 
 
+# P2-27 fix: module-level detector preserves hysteresis state across calls.
+# Previously, a new RegimeDetector() was created each call, resetting the
+# _previous_regime field and defeating the H9 hysteresis logic.
+_dashboard_regime_detector = None
+
+
 def _fetch_regime_state() -> dict | None:
     """Fetch current market regime (VIX + SPY drawdown)."""
+    global _dashboard_regime_detector
     try:
         from python.monitoring.regime import (
             RegimeDetector,
@@ -1423,8 +1430,9 @@ def _fetch_regime_state() -> dict | None:
         if vix is None or spy_dd is None:
             return None
 
-        detector = RegimeDetector()
-        regime_state = detector.get_regime_state(vix, spy_dd)
+        if _dashboard_regime_detector is None:
+            _dashboard_regime_detector = RegimeDetector()
+        regime_state = _dashboard_regime_detector.get_regime_state(vix, spy_dd)
         return {
             "regime": regime_state.regime,
             "vix": regime_state.vix,

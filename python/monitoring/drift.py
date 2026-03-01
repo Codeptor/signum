@@ -17,8 +17,18 @@ class DriftDetector:
         self.threshold = threshold
 
     def detect(self, current: pd.DataFrame) -> dict:
-        """Run KS test for each feature and return drift report."""
+        """Run KS test for each feature and return drift report.
+
+        P2-28 fix: applies Bonferroni correction to the p-value threshold
+        when testing multiple features simultaneously.  With ~11 features,
+        the uncorrected p<0.05 has a ~43% family-wise error rate, leading
+        to frequent false drift alarms.
+        """
         report = {}
+        # P2-28: Bonferroni correction — divide threshold by number of tests
+        n_tests = sum(1 for col in self.reference.columns if col in current.columns)
+        corrected_threshold = self.threshold / max(n_tests, 1)
+
         for col in self.reference.columns:
             if col not in current.columns:
                 continue
@@ -42,7 +52,7 @@ class DriftDetector:
                 "ks_statistic": ks_stat,
                 "p_value": p_value,
                 "psi": psi,
-                "drifted": bool(p_value < self.threshold),
+                "drifted": bool(p_value < corrected_threshold),
             }
 
         drifted = [k for k, v in report.items() if v["drifted"]]
