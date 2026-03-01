@@ -32,7 +32,12 @@ class RiskLimits:
     min_position_weight: float = 0.01  # Min 1% (avoid dust positions)
 
     # Portfolio limits
-    max_portfolio_var_95: float = 0.06  # Max 6% daily VaR
+    # P1-12 fix: tightened from 6% to 2.5%.  A 6% daily VaR95 implies
+    # ~2.5% chance of losing 6%+ in a single day — for a ~$100K portfolio
+    # that's a $6K daily loss threshold, which is far too permissive for
+    # a conservative weekly rebalancing strategy.  2.5% is consistent with
+    # institutional equity L/S limits.
+    max_portfolio_var_95: float = 0.025  # Max 2.5% daily VaR
     max_drawdown_limit: float = 0.15  # Max 15% drawdown
     min_sharpe_ratio: float = -0.5  # Minimum Sharpe
 
@@ -473,13 +478,31 @@ class RiskManager:
         ticker: str,
         weight_change: float,
         current_date: Optional[str] = None,
-    ):
-        """Record a trade for daily limit tracking."""
+    ) -> bool:
+        """Record a trade for daily limit tracking.
+
+        P1-13 fix: returns False and logs a warning if the trade would
+        breach position-size or daily-trade limits.  This is a defense-in-depth
+        guard — callers should still use check_trade() for pre-validation,
+        but record_trade() now refuses to record clearly illegal trades.
+        """
         date_key = current_date or pd.Timestamp.now(tz="America/New_York").strftime("%Y-%m-%d")
+
+        import logging
+
+        logger = logging.getLogger(__name__)
 
         # Skip small weight changes (dust trades)
         if abs(weight_change) < 0.001:
-            return
+            return True
+
+        # P1-13: write-level enforcement — refuse clearly illegal trades
+        if abs(weight_change) > self.limits.max_single_trade_size:
+            logger.warning(
+                f"record_trade BLOCKED: {ticker} weight_change={weight_change:.1%} "
+                f"exceeds max_single_trade_size={self.limits.max_single_trade_size:.1%}"
+            )
+            return False
 
         # M4 fix: prune entries older than 7 days to prevent unbounded growth
         if len(self.daily_trades) > 30:
@@ -503,6 +526,8 @@ class RiskManager:
                 self.current_weights[ticker] = self.current_weights[ticker] + weight_change
             else:
                 self.current_weights[ticker] = weight_change
+
+        return True
 
     def get_risk_summary(self) -> Dict:
         """Get summary of current risk status."""

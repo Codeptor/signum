@@ -61,24 +61,33 @@ class TransactionCostAnalyzer:
         Expected columns: symbol, side, order_qty, fill_qty, fill_price,
         decision_price, timestamp. Optional: commission, vwap.
         """
-        required = {"symbol", "side", "order_qty", "fill_qty", "fill_price",
-                     "decision_price", "timestamp"}
+        required = {
+            "symbol",
+            "side",
+            "order_qty",
+            "fill_qty",
+            "fill_price",
+            "decision_price",
+            "timestamp",
+        }
         missing = required - set(df.columns)
         if missing:
             raise ValueError(f"Missing columns: {missing}")
 
         for _, row in df.iterrows():
-            self._trades.append(TradeRecord(
-                symbol=row["symbol"],
-                side=row["side"],
-                order_qty=row["order_qty"],
-                fill_qty=row["fill_qty"],
-                fill_price=row["fill_price"],
-                decision_price=row["decision_price"],
-                timestamp=row["timestamp"],
-                commission=row.get("commission", 0.0),
-                vwap=row.get("vwap", None),
-            ))
+            self._trades.append(
+                TradeRecord(
+                    symbol=row["symbol"],
+                    side=row["side"],
+                    order_qty=row["order_qty"],
+                    fill_qty=row["fill_qty"],
+                    fill_price=row["fill_price"],
+                    decision_price=row["decision_price"],
+                    timestamp=row["timestamp"],
+                    commission=row.get("commission", 0.0),
+                    vwap=row.get("vwap", None),
+                )
+            )
 
     @property
     def n_trades(self) -> int:
@@ -89,9 +98,7 @@ class TransactionCostAnalyzer:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def implementation_shortfall(
-        fill_price: float, decision_price: float, side: str
-    ) -> float:
+    def implementation_shortfall(fill_price: float, decision_price: float, side: str) -> float:
         """Implementation shortfall in basis points.
 
         For buys, positive IS means you paid more than the decision price.
@@ -133,9 +140,7 @@ class TransactionCostAnalyzer:
 
         rows = []
         for t in self._trades:
-            is_bps = self.implementation_shortfall(
-                t.fill_price, t.decision_price, t.side
-            )
+            is_bps = self.implementation_shortfall(t.fill_price, t.decision_price, t.side)
             vwap_slip = (
                 self.vwap_slippage_bps(t.fill_price, t.vwap)
                 if t.vwap is not None and t.vwap > 0
@@ -143,26 +148,31 @@ class TransactionCostAnalyzer:
             )
             fr = self.fill_rate(t.fill_qty, t.order_qty)
             trade_value = t.fill_price * t.fill_qty
-            commission_bps = (
-                t.commission / trade_value * 10_000 if trade_value > 0 else 0.0
-            )
+            commission_bps = t.commission / trade_value * 10_000 if trade_value > 0 else 0.0
 
-            rows.append({
-                "symbol": t.symbol,
-                "side": t.side,
-                "fill_price": t.fill_price,
-                "decision_price": t.decision_price,
-                "fill_qty": t.fill_qty,
-                "order_qty": t.order_qty,
-                "timestamp": t.timestamp,
-                "commission": t.commission,
-                "is_bps": is_bps,
-                "vwap_slip_bps": vwap_slip,
-                "fill_rate": fr,
-                "trade_value": trade_value,
-                "commission_bps": commission_bps,
-                "total_cost_bps": abs(is_bps) + commission_bps,
-            })
+            rows.append(
+                {
+                    "symbol": t.symbol,
+                    "side": t.side,
+                    "fill_price": t.fill_price,
+                    "decision_price": t.decision_price,
+                    "fill_qty": t.fill_qty,
+                    "order_qty": t.order_qty,
+                    "timestamp": t.timestamp,
+                    "commission": t.commission,
+                    "is_bps": is_bps,
+                    "vwap_slip_bps": vwap_slip,
+                    "fill_rate": fr,
+                    "trade_value": trade_value,
+                    "commission_bps": commission_bps,
+                    # P1-19 fix: use signed is_bps instead of abs().
+                    # Negative IS means favorable execution (filled below
+                    # decision price on a buy) — abs() was penalizing good fills.
+                    # Signed total preserves the information: positive = cost,
+                    # negative = net savings from favorable execution.
+                    "total_cost_bps": is_bps + commission_bps,
+                }
+            )
 
         return pd.DataFrame(rows)
 
@@ -247,11 +257,10 @@ class TransactionCostAnalyzer:
 
         flagged = df[df["participation_pct"] > threshold_pct].copy()
         if not flagged.empty:
-            logger.warning(
-                f"TCA: {len(flagged)} trades exceed {threshold_pct}% ADV participation"
-            )
-        return flagged[["symbol", "side", "fill_qty", "adv", "participation_pct",
-                         "timestamp"]].sort_values("participation_pct", ascending=False)
+            logger.warning(f"TCA: {len(flagged)} trades exceed {threshold_pct}% ADV participation")
+        return flagged[
+            ["symbol", "side", "fill_qty", "adv", "participation_pct", "timestamp"]
+        ].sort_values("participation_pct", ascending=False)
 
     def to_json(self) -> dict:
         """Export full TCA report as JSON-serializable dict (for dashboard API)."""
@@ -290,17 +299,21 @@ class TransactionCostAnalyzer:
         # Serialize trade records
         records = []
         for t in self._trades[-2000:]:  # Keep last 2000
-            records.append({
-                "symbol": t.symbol,
-                "side": t.side,
-                "order_qty": t.order_qty,
-                "fill_qty": t.fill_qty,
-                "fill_price": t.fill_price,
-                "decision_price": t.decision_price,
-                "timestamp": t.timestamp.isoformat() if isinstance(t.timestamp, datetime) else str(t.timestamp),
-                "commission": t.commission,
-                "vwap": t.vwap,
-            })
+            records.append(
+                {
+                    "symbol": t.symbol,
+                    "side": t.side,
+                    "order_qty": t.order_qty,
+                    "fill_qty": t.fill_qty,
+                    "fill_price": t.fill_price,
+                    "decision_price": t.decision_price,
+                    "timestamp": t.timestamp.isoformat()
+                    if isinstance(t.timestamp, datetime)
+                    else str(t.timestamp),
+                    "commission": t.commission,
+                    "vwap": t.vwap,
+                }
+            )
 
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(records, indent=2))
@@ -329,17 +342,19 @@ class TransactionCostAnalyzer:
                         ts = datetime.fromisoformat(ts)
                     except ValueError:
                         ts = datetime.now()
-                trades.append(TradeRecord(
-                    symbol=r["symbol"],
-                    side=r["side"],
-                    order_qty=r["order_qty"],
-                    fill_qty=r["fill_qty"],
-                    fill_price=r["fill_price"],
-                    decision_price=r["decision_price"],
-                    timestamp=ts,
-                    commission=r.get("commission", 0.0),
-                    vwap=r.get("vwap"),
-                ))
+                trades.append(
+                    TradeRecord(
+                        symbol=r["symbol"],
+                        side=r["side"],
+                        order_qty=r["order_qty"],
+                        fill_qty=r["fill_qty"],
+                        fill_price=r["fill_price"],
+                        decision_price=r["decision_price"],
+                        timestamp=ts,
+                        commission=r.get("commission", 0.0),
+                        vwap=r.get("vwap"),
+                    )
+                )
             logger.info(f"TCA: loaded {len(trades)} trade records from {path}")
             return cls(trades=trades)
         except Exception as e:

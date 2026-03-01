@@ -160,9 +160,9 @@ The Next.js dashboard provides **real-time A/B comparison** of Bot A vs Bot B du
 
 | Regime | HMM State | Threshold Condition | Action |
 |--------|-----------|-------------------|--------|
-| Normal | Low-vol | VIX < 25, SPY DD < 8% | Full exposure |
-| Caution | High-vol OR crisis | VIX 25-35 or SPY DD 8-15% | 50% exposure |
-| Halt | Crisis (consensus) | VIX > 35 AND SPY DD > 15% AND HMM=crisis | Liquidate, wait |
+| Normal | Low-vol | VIX < 30, SPY DD < 10% | Full exposure |
+| Caution | High-vol OR crisis | VIX 30-40 or SPY DD 10-15% | 50% exposure |
+| Halt | Crisis (consensus) | VIX > 40 AND SPY DD > 15% AND HMM=crisis | Liquidate, wait |
 
 ## Risk Limits
 

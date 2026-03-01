@@ -69,7 +69,7 @@ class TestRiskLimits:
         assert limits.max_drawdown_limit == 0.15
         assert limits.max_daily_trades == 50
         assert limits.min_sharpe_ratio == -0.5
-        assert limits.max_portfolio_var_95 == 0.06
+        assert limits.max_portfolio_var_95 == 0.025  # P1-12: tightened from 0.06
         assert limits.min_risk_reward_ratio == 2.0
 
     def test_custom_limits(self):
@@ -312,27 +312,34 @@ class TestTradeRecording:
 
     def test_record_trade_updates_count(self, risk_manager):
         """Test that recording trade updates daily count."""
-        risk_manager.record_trade("AAPL", 0.20, "2024-01-01")
+        # P1-13: use weight_change within max_single_trade_size (0.15)
+        risk_manager.record_trade("AAPL", 0.10, "2024-01-01")
 
         assert risk_manager.daily_trades["2024-01-01"] == 1
 
-        risk_manager.record_trade("MSFT", 0.15, "2024-01-01")
+        risk_manager.record_trade("MSFT", 0.12, "2024-01-01")
 
         assert risk_manager.daily_trades["2024-01-01"] == 2
 
     def test_record_trade_updates_turnover(self, risk_manager):
         """Test that recording trade updates turnover."""
-        risk_manager.record_trade("AAPL", 0.20, "2024-01-01")
+        risk_manager.record_trade("AAPL", 0.10, "2024-01-01")
 
-        assert risk_manager.daily_turnover["2024-01-01"] == 0.20
+        assert risk_manager.daily_turnover["2024-01-01"] == 0.10
 
     def test_record_trade_updates_weights(self, risk_manager):
         """Test that recording trade updates current weights."""
         risk_manager.current_weights = pd.Series({"AAPL": 0.0, "MSFT": 0.0})
 
-        risk_manager.record_trade("AAPL", 0.20, "2024-01-01")
+        risk_manager.record_trade("AAPL", 0.10, "2024-01-01")
 
-        assert risk_manager.current_weights["AAPL"] == 0.20
+        assert risk_manager.current_weights["AAPL"] == 0.10
+
+    def test_record_trade_blocks_oversized(self, risk_manager):
+        """P1-13: record_trade blocks trades exceeding max_single_trade_size."""
+        result = risk_manager.record_trade("AAPL", 0.20, "2024-01-01")
+        assert result is False
+        assert risk_manager.daily_trades.get("2024-01-01", 0) == 0
 
     def test_record_trade_ignores_small_changes(self, risk_manager):
         """Test that small weight changes are not recorded."""

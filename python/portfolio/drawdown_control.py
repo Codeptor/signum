@@ -134,9 +134,7 @@ class CPPIOverlay:
             multiplier=self.multiplier,
         )
 
-    def adjust_weights(
-        self, weights: dict[str, float], portfolio_value: float
-    ) -> dict[str, float]:
+    def adjust_weights(self, weights: dict[str, float], portfolio_value: float) -> dict[str, float]:
         """Scale portfolio weights by CPPI risky allocation.
 
         Parameters
@@ -234,6 +232,15 @@ class DrawdownController:
             factor = 1.0
         elif dd_abs >= self.hard_limit:
             factor = 0.0
+            # P1-11 fix: reset peak after hard liquidation to prevent deadlock.
+            # Without this, after hitting hard_limit the portfolio is fully
+            # liquidated (factor=0), but the old peak persists.  With no
+            # positions, equity can't grow back to the old peak, so dd_abs
+            # stays >= hard_limit forever — the system never re-enters.
+            # Resetting the peak to current value allows recovery to start
+            # from the post-liquidation level.
+            self._peak = portfolio_value
+            self._is_deleveraging = False
         else:
             # Linear interpolation between max_dd and hard_limit
             range_dd = self.hard_limit - self.max_dd
@@ -251,9 +258,7 @@ class DrawdownController:
             current_value=portfolio_value,
         )
 
-    def adjust_weights(
-        self, weights: dict[str, float], portfolio_value: float
-    ) -> dict[str, float]:
+    def adjust_weights(self, weights: dict[str, float], portfolio_value: float) -> dict[str, float]:
         """Scale weights by exposure factor."""
         state = self.update(portfolio_value)
         return {k: v * state.exposure_factor for k, v in weights.items()}
@@ -312,10 +317,7 @@ class LossBudgetAllocator:
             weights = {s: 1.0 / n for s in strategies}
         else:
             total_w = sum(self._strategy_weights.get(s, 1.0) for s in strategies)
-            weights = {
-                s: self._strategy_weights.get(s, 1.0) / total_w
-                for s in strategies
-            }
+            weights = {s: self._strategy_weights.get(s, 1.0) / total_w for s in strategies}
         return {s: w * self.total_budget for s, w in weights.items()}
 
     def update_pnl(self, strategy: str, pnl: float) -> LossBudget:
