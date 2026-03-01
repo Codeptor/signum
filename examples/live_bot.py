@@ -1406,8 +1406,22 @@ def main():
                     )
                 else:
                     weights = pd.Series()
-                # C-DD fix: pass live equity curve for accurate drawdown calc
+
+                # P0-4 fix: use BROKER equity for drawdown check, not bridge.
+                # Bridge equity is only synced weekly during run_trading_cycle.
+                # Between rebalances, a crash could push drawdown past 15%
+                # without the kill switch noticing if we rely on bridge data.
+                # Compute drawdown from the persisted equity_peak (survives restarts).
+                broker_equity = account.equity
+                prev_state = _load_bot_state()
+                equity_peak = max(
+                    broker_equity,
+                    prev_state.get("equity_peak", broker_equity),
+                )
+                # Build a minimal equity curve with the broker-authoritative value
                 live_eq = [pt["equity"] for pt in bridge.equity_curve]
+                if not live_eq or live_eq[-1] != broker_equity:
+                    live_eq.append(broker_equity)
                 risk_checks = risk_manager.check_portfolio_risk(weights, live_equity_curve=live_eq)
                 critical_violations = [
                     c for c in risk_checks if not c.passed and c.severity == "critical"
