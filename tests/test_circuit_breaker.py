@@ -340,7 +340,8 @@ class TestGetMlWeightsCircuitBreaker:
         mock_reshape.return_value = long_df
 
         mock_features.return_value = MagicMock()
-        mock_rank.return_value = ["AAPL"]
+        # P1-10: rank_stocks now returns (tickers, scores) tuple
+        mock_rank.return_value = (["AAPL"], {"AAPL": 0.05})
         mock_optimize.return_value = {"AAPL": 1.0}
 
         weights, stale_data = get_ml_weights(top_n=1)
@@ -390,7 +391,8 @@ class TestGetMlWeightsCircuitBreaker:
         mock_reshape.return_value = long_df
 
         mock_features.return_value = MagicMock()
-        mock_rank.return_value = ["AAPL"]
+        # P1-10: rank_stocks now returns (tickers, scores) tuple
+        mock_rank.return_value = (["AAPL"], {"AAPL": 0.05})
         mock_optimize.return_value = {"AAPL": 1.0}
 
         weights, stale_data = get_ml_weights(top_n=1)
