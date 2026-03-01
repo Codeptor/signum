@@ -712,6 +712,30 @@ def run_trading_cycle(
     for ticker, w in sorted(target_weights.items(), key=lambda x: -x[1]):
         logger.info(f"  {ticker}: {w:.2%}")
 
+    # P2-24: Pre-batch portfolio VaR check — verify the proposed portfolio
+    # doesn't breach VaR limits BEFORE submitting any orders.  This is a
+    # defense-in-depth guard (risk_manager checks post-trade too) that
+    # prevents the bot from even starting a rebalance into a high-risk portfolio.
+    if risk_manager.risk_engine is not None:
+        try:
+            portfolio_checks = risk_manager.check_portfolio_risk(pd.Series(target_weights))
+            critical_violations = [
+                c for c in portfolio_checks if not c.passed and c.severity == "critical"
+            ]
+            if critical_violations:
+                violation_msgs = "; ".join(c.message for c in critical_violations)
+                logger.error(
+                    f"Pre-rebalance VaR check FAILED — {len(critical_violations)} "
+                    f"critical violations: {violation_msgs}"
+                )
+                _send_alert(
+                    f"Rebalance blocked by pre-trade risk check: {violation_msgs}",
+                    AlertSeverity.CRITICAL,
+                )
+                return False
+        except Exception as e:
+            logger.warning(f"Pre-rebalance VaR check skipped (non-fatal): {e}")
+
     # Feature drift detection — compare inference features to training reference.
     # Informational only during paper trading: log and alert but don't block.
     import python.alpha.predict as _predict_mod
@@ -871,12 +895,37 @@ def run_trading_cycle(
     #    - Sells: simple market order
     logger.info("Submitting orders to Alpaca...")
     submitted_orders: list[dict] = []  # Track for fill verification
+
+    # P2-25: pre-compute ADV (average daily volume) for liquidity gating.
+    # Positions exceeding 5% of ADV risk significant market impact.
+    MAX_ADV_PCT = 0.05  # Max 5% of average daily volume
+    adv_cache: dict[str, float] = {}
+    try:
+        import python.alpha.predict as _pred
+
+        raw_ohlcv = _pred._last_raw_ohlcv
+        if raw_ohlcv is not None and "volume" in raw_ohlcv.columns:
+            adv_cache = (
+                raw_ohlcv.groupby("ticker")["volume"].apply(lambda v: v.tail(20).mean()).to_dict()
+            )
+    except Exception:
+        pass  # Non-fatal: proceed without liquidity check
+
     for fill in fills:
         try:
             symbol = fill.order.ticker
             side = fill.order.side.lower()  # BUY/SELL -> buy/sell
             qty = round(abs(fill.fill_quantity), 4)  # Fractional shares OK (Fix #32)
             if qty < 0.0001:
+                continue
+
+            # P2-25: liquidity gate — skip orders exceeding 5% of ADV
+            adv = adv_cache.get(symbol, 0)
+            if adv > 0 and qty > adv * MAX_ADV_PCT:
+                logger.warning(
+                    f"LIQUIDITY GATE: {symbol} order qty={qty:.0f} exceeds "
+                    f"{MAX_ADV_PCT:.0%} of ADV ({adv:.0f}) — skipping"
+                )
                 continue
 
             # Submit simple market order (SL/TP added after fill for buys)
