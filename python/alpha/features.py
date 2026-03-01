@@ -290,10 +290,14 @@ def _compute_single_ticker(df: pd.DataFrame) -> pd.DataFrame:
         df[f"rsi_{w}"] = 100 - (100 / (1 + rs))
 
     # MACD
-    ema12 = c.ewm(span=12).mean()
-    ema26 = c.ewm(span=26).mean()
+    # P1-7 fix: set min_periods on EWM to avoid forward-filling from a
+    # single data point.  Without min_periods, ewm().mean() returns a value
+    # from the very first row, producing unstable features during the warm-up
+    # window that differ between train (long history) and serve (short fetch).
+    ema12 = c.ewm(span=12, min_periods=12).mean()
+    ema26 = c.ewm(span=26, min_periods=26).mean()
     df["macd"] = ema12 - ema26
-    df["macd_signal"] = df["macd"].ewm(span=9).mean()
+    df["macd_signal"] = df["macd"].ewm(span=9, min_periods=9).mean()
 
     # Bollinger Bands
     ma20 = c.rolling(20).mean()
@@ -402,7 +406,11 @@ def compute_cross_sectional_features(df: pd.DataFrame) -> pd.DataFrame:
             df["sector_rel_mom"] = df["ret_20d"] - sector_mean
             df.drop(columns=["_sector"], inplace=True)
         except Exception as exc:
+            # P1-8 fix: ensure sector_rel_mom column exists even on failure.
+            # Without this, downstream code expecting the column (e.g. the
+            # model's feature_cols list) would get a KeyError.
             logger.warning(f"Could not compute sector-relative momentum: {exc}")
+            df["sector_rel_mom"] = np.nan
 
     # C11 fix: scrub any inf that may leak from upstream computations
     df = _scrub_infinities(df)
@@ -600,11 +608,17 @@ def compute_residual_target(df: pd.DataFrame, horizon: int = 5) -> pd.DataFrame:
 
     Preserves the raw target as raw_target_{horizon}d and replaces
     target_{horizon}d with the residual (stock return minus market mean).
+
+    P1-23 fix: operates on a copy to avoid mutating the caller's DataFrame.
+    Previously, the input df was modified in-place, which could corrupt
+    upstream references (e.g. the ``labeled`` DataFrame in train.py was
+    silently modified before CV splitting).
     """
     target_col = f"target_{horizon}d"
     if target_col not in df.columns:
         return df
 
+    df = df.copy()  # P1-23 fix: never mutate caller's DataFrame
     df[f"raw_target_{horizon}d"] = df[target_col]
     cs_mean = df.groupby(level=0)[target_col].transform("mean")
     df[target_col] = df[target_col] - cs_mean
