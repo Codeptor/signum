@@ -1488,10 +1488,39 @@ def register_api_routes(app: dash.Dash) -> None:
     """Register JSON API routes on the Dash app's Flask server.
 
     Every endpoint returns ``Content-Type: application/json`` with
-    ``Access-Control-Allow-Origin: *`` so any LLM, script, or browser
-    can fetch data without auth (paper trading — no secrets exposed).
+    CORS restricted to localhost and the dashboard domain.
+
+    P0-3 fix: API endpoints are protected by bearer token authentication.
+    Set DASHBOARD_API_TOKEN in .env to enable. When unset, a warning is
+    logged and the API remains open (backward-compatible for local dev).
+    The /healthz endpoint is exempt to allow monitoring probes.
     """
     server = app.server
+    api_token = os.getenv("DASHBOARD_API_TOKEN", "")
+    if not api_token:
+        logger.warning(
+            "DASHBOARD_API_TOKEN not set — API endpoints are unauthenticated. "
+            "Set this env var before exposing the dashboard to the network."
+        )
+
+    @server.before_request
+    def _check_api_auth():
+        """Enforce bearer token on /api/* routes (skip /healthz and Dash UI)."""
+        from flask import request as _req
+
+        path = _req.path
+        # Only protect /api/ routes; leave /healthz, Dash UI, and assets open
+        if not path.startswith("/api"):
+            return None
+        if not api_token:
+            return None  # No token configured — open access (local dev)
+        auth_header = _req.headers.get("Authorization", "")
+        if auth_header == f"Bearer {api_token}":
+            return None  # Authenticated
+        return _json_response(
+            {"error": "Unauthorized. Provide Authorization: Bearer <token> header."},
+            401,
+        )
 
     # ── GET /api — endpoint index ──
     @server.route("/api")
@@ -1502,7 +1531,7 @@ def register_api_routes(app: dash.Dash) -> None:
                 "description": (
                     "JSON API for the Signum quantitative trading system. "
                     "All endpoints return structured JSON. "
-                    "No authentication required (paper trading)."
+                    "Authentication via Bearer token (set DASHBOARD_API_TOKEN)."
                 ),
                 "timestamp": datetime.now().isoformat(),
                 "endpoints": {path: desc for path, desc in _API_ENDPOINTS.items()},
