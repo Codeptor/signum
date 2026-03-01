@@ -4,12 +4,15 @@
 
 Signum is an automated quantitative equity trading bot. It trains a LightGBM model weekly on S&P 500 data, selects the top 10 stocks by predicted 5-day residual return, optimizes portfolio weights via HRP, and executes through Alpaca with ATR-based stop-loss/take-profit brackets.
 
-**Status:** Live paper trading $100k on a DigitalOcean VPS. Collecting data for 3+ months before evaluating for real capital.
+**This is the `main` branch — Bot A (single LightGBM pipeline).**
+**Bot B (ensemble: LightGBM + CatBoost + RF + Ridge stacking) runs on `feature/comprehensive-improvements`.**
+
+**Status:** Live paper trading $100k on a DigitalOcean VPS. Both bots run side-by-side for A/B comparison via a Next.js dashboard on Vercel. Collecting data for 3+ months before evaluating for real capital.
 
 ## Critical Rules
 
 - **Use `uv run` for everything** — `uv run python -m pytest tests/ -x -q --tb=short`, never raw `python` or `pip`
-- **Test command:** `uv run python -m pytest tests/ -x -q --tb=short` — must pass **589 tests**
+- **Test command:** `uv run python -m pytest tests/ -x -q --tb=short` — must pass **594 tests**
 - **Never commit secrets** — `.env`, API keys, SSH keys (`deploy/signum_ed25519`) are gitignored
 - **The bot defaults to paper trading.** Only `LIVE_TRADING=true` env var activates real money. Do not set this.
 - **LSP errors** about unresolved imports (numpy, pandas, pytest, etc.) are pre-existing venv-path issues — **ignore them**
@@ -63,7 +66,8 @@ examples/live_bot.py          Entry point — runs weekly on Wednesdays
 | Spec | 2 vCPU, 4 GB RAM, 80 GB disk, Ubuntu 22.04 |
 | SSH | `ssh -i deploy/signum_ed25519 root@209.38.122.78` |
 | Services | `signum-bot.service` + `signum-dashboard.service` |
-| Dashboard | `https://dashboard.bhanueso.dev` (nginx + Let's Encrypt) |
+| Dash UI | `https://dashboard.bhanueso.dev` (nginx + Let's Encrypt) |
+| A/B Dashboard | Next.js on Vercel (compares Bot A vs Bot B side-by-side) |
 | Logs | `/var/log/signum/bot.log`, `/var/log/signum/bot-error.log` |
 | Project path | `/opt/signum/` |
 | uv path | `/root/.local/bin/uv` |
@@ -129,7 +133,7 @@ TELEGRAM_CHAT_ID=<your chat ID>
 ## Running Tests
 
 ```bash
-# Full suite (should pass 589 tests in ~77s)
+# Full suite (should pass 594 tests in ~80s)
 uv run python -m pytest tests/ -x -q --tb=short
 
 # Specific modules
@@ -161,7 +165,7 @@ signum/
 │   ├── data/                      # Data ingestion, config, sectors
 │   ├── backtest/                  # Walk-forward backtest, purged CV, robustness, regime analysis
 │   └── monitoring/                # Alerting, Telegram commands, dashboard, drift, regime
-├── tests/                         # 589 tests mirroring python/ structure
+├── tests/                         # 594 tests mirroring python/ structure
 ├── deploy/
 │   ├── signum_ed25519             # SSH private key (NOT in git)
 │   ├── signum-bot.service         # systemd unit (trading bot)
@@ -172,6 +176,17 @@ signum/
 │   └── IMPROVEMENT_PLAN.md        # Improvement roadmap (all phases implemented)
 └── rust/matching-engine/          # Lock-free order book (research, not used in live)
 ```
+
+## A/B Comparison (Bot A vs Bot B)
+
+Bot A (this branch) and Bot B (`feature/comprehensive-improvements`) run side-by-side on the same VPS, each paper trading $100k independently. A **Next.js dashboard** on Vercel provides real-time comparison of equity curves, positions, risk metrics, sector exposure, and regime status.
+
+| Bot | Branch | Model | Features | Dashboard |
+|-----|--------|-------|----------|-----------|
+| **A** | `main` | Single LightGBM | 22 | Dash web UI on VPS |
+| **B** | `feature/comprehensive-improvements` | LightGBM + CatBoost + RF + Ridge stacking | 27 (11 active) | Same Next.js dashboard |
+
+The Next.js dashboard source lives on the `feature/comprehensive-improvements` branch at `dashboard/`.
 
 ## Known Limitations (documented, not fixing)
 

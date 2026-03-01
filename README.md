@@ -1,12 +1,12 @@
 # Signum
 
 [![CI](https://github.com/Codeptor/signum/actions/workflows/ci.yml/badge.svg)](https://github.com/Codeptor/signum/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-589%20passed-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-594%20passed-brightgreen)]()
 [![Paper Trading](https://img.shields.io/badge/status-paper%20trading-blue)]()
 
 Automated quantitative equity trading system. Trains a LightGBM model weekly on S&P 500 data, selects top 10 stocks by predicted 5-day return, optimizes portfolio weights via HRP, and executes through Alpaca with ATR-based stop-loss/take-profit brackets.
 
-Currently paper trading on a DigitalOcean VPS. Collecting data for 3+ months before evaluating for real capital.
+Currently paper trading $100k on a DigitalOcean VPS. This is **Bot A** (`main` branch). Bot B (ensemble: LightGBM + CatBoost + RF + Ridge stacking) runs on the `feature/comprehensive-improvements` branch for A/B comparison via a [Next.js dashboard](#ab-dashboard).
 
 ## How It Works
 
@@ -60,14 +60,11 @@ The bot monitors VIX and SPY drawdown continuously:
 
 De-escalation uses OR logic (either VIX or drawdown clearing allows caution).
 
-### Model Ensemble
+### Model
 
-Two-model ensemble with IC-weighted calibration:
+The live pipeline uses a **single LightGBM** model (Huber loss, residual return target). An ensemble module (`ensemble.py`) with LightGBM + RF exists for research but is **not wired into the live trading loop** on this branch.
 
-- **LightGBM** (60%) — gradient boosting, captures non-linear feature interactions
-- **Random Forest** (40%) — bagging, robust to outliers
-
-Weights are dynamically recalibrated each training cycle using Spearman rank IC on a held-out validation set.
+Bot B on `feature/comprehensive-improvements` uses the full ensemble (LightGBM 45% + CatBoost 30% + RF 25% + Ridge stacking meta-learner).
 
 ## Deployment
 
@@ -79,6 +76,8 @@ The bot runs on a VPS as two systemd services:
 | `signum-dashboard` | Dash web UI + JSON API | 8050 (localhost only) |
 
 Both auto-restart on crash and start on boot.
+
+A **Next.js A/B dashboard** on Vercel compares Bot A (this branch) vs Bot B (ensemble) in real-time. See [A/B Dashboard](#ab-dashboard).
 
 ### Quick Deploy
 
@@ -159,13 +158,19 @@ CRITICAL alerts bypass rate limiting. All others rate-limited to 20/5min.
 
 Transport priority: Telegram (always) > Resend > SendGrid > SMTP for email.
 
-### Dashboard
+### Dash Web UI (Bot A only)
 
 Public at `https://dashboard.bhanueso.dev` (nginx reverse proxy + Let's Encrypt SSL).
 
 Two tabs:
 - **Live** — account overview, open positions, regime beacon, equity curve, bot log viewer
 - **Backtest** — historical performance, drawdown, rolling Sharpe
+
+### A/B Dashboard
+
+A **Next.js dashboard** on Vercel provides real-time side-by-side comparison of Bot A vs Bot B during paper trading. Features: dual equity chart overlay, sector exposure bars, risk metrics, positions, logs, keyboard shortcuts (1/2/R/Space), market session detection, browser notifications on regime changes.
+
+The dashboard source lives on the `feature/comprehensive-improvements` branch at `dashboard/`. It uses a server-side API proxy to route requests to each bot's VPS endpoint.
 
 ### JSON API
 
@@ -226,8 +231,8 @@ signum/
 ├── python/
 │   ├── alpha/
 │   │   ├── features.py          # 22 alpha features + winsorization
-│   │   ├── model.py             # LightGBM/CatBoost wrapper
-│   │   ├── ensemble.py          # LightGBM + RF ensemble with IC calibration
+│   │   ├── model.py             # LightGBM (Huber loss) wrapper
+│   │   ├── ensemble.py          # LightGBM + RF ensemble (research only, not wired into live)
 │   │   ├── predict.py           # End-to-end: data → features → rank → optimize
 │   │   └── train.py             # Training pipeline orchestrator
 │   ├── portfolio/
@@ -257,7 +262,7 @@ signum/
 ├── deploy/
 │   ├── signum-bot.service       # systemd service file (trading bot)
 │   └── signum-dashboard.service # systemd service file (web dashboard)
-├── tests/                       # 589 tests
+├── tests/                       # 594 tests
 ├── rust/matching-engine/        # Lock-free order book (sub-microsecond)
 ├── run_live_bot.sh              # Bash wrapper with crash recovery
 ├── .env.example                 # Environment variable template
@@ -320,11 +325,13 @@ Key fixes: OCO order construction, train/inference winsorization parity, date-sp
 
 Post-audit additions: yfinance circuit breaker, centralized alerting module (Telegram + email), Telegram command handler, /healthz endpoint, structured JSON logging.
 
+Bot B (`feature/comprehensive-improvements`) extends this with ensemble models, HMM regime detection, TCA, confidence-weighted sizing, graduated drawdown control, SHAP explainability, and 1443+ tests.
+
 ## Tests
 
 ```bash
 uv run python -m pytest tests/ -x -q --tb=short
-# 589 passed in ~77s
+# 594 passed in ~80s
 ```
 
 Coverage includes: ML pipeline (features, model, ensemble, predict), portfolio optimization, risk engine, risk manager, execution bridge, broker integration, backtest validation, robustness analysis, live bot helpers, alerting (Telegram, SendGrid, SMTP, webhook), Telegram command handler, and full integration tests.
