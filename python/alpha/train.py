@@ -185,11 +185,11 @@ def _purged_walk_forward_cv(
             & (labeled.index.get_level_values(0) <= test_end_date)
         ]
 
-        n_purged = (
-            len(labeled.loc[
+        n_purged = len(
+            labeled.loc[
                 (labeled.index.get_level_values(0) > purge_cutoff)
                 & (labeled.index.get_level_values(0) <= train_end_date)
-            ])
+            ]
         )
         if n_purged > 0:
             logger.info(f"Fold {fold}: purged {n_purged} rows with overlapping labels")
@@ -244,9 +244,7 @@ def _purged_walk_forward_cv(
             # Use LightGBM model for SHAP (works for both single and ensemble)
             shap_model = model.lgbm.model if hasattr(model, "lgbm") else model.model
             if shap_model is not None:
-                shap_df = compute_shap_importance(
-                    shap_model, test_fold[feature_cols], feature_cols
-                )
+                shap_df = compute_shap_importance(shap_model, test_fold[feature_cols], feature_cols)
                 fold_shap_dfs.append(shap_df)
         except Exception as e:
             logger.debug(f"SHAP failed for fold {fold}: {e}")
@@ -273,8 +271,7 @@ def _purged_walk_forward_cv(
     std_ic = float(np.std(fold_ics)) if len(fold_ics) > 1 else 0.0
 
     logger.info(
-        f"Purged walk-forward CV: {len(fold_ics)} folds, "
-        f"mean IC={mean_ic:.4f} ± {std_ic:.4f}"
+        f"Purged walk-forward CV: {len(fold_ics)} folds, mean IC={mean_ic:.4f} ± {std_ic:.4f}"
     )
 
     # SHAP stability across folds
@@ -455,7 +452,12 @@ def run_training(
     """
     raw = pd.read_parquet(data_path)
     raw = reshape_ohlcv_wide_to_long(raw)
-    featured = compute_alpha_features(raw)
+    # P0-6 fix: skip winsorization here — the CV loop and final training
+    # manage their own per-fold winsorization with train-only bounds.
+    # Previously, features were winsorized twice (here with data quantiles,
+    # then again in CV/final with train-only bounds), causing train/serve
+    # skew because inference only winsorizes once.
+    featured = compute_alpha_features(raw, skip_winsorize=True)
     featured = compute_cross_sectional_features(featured)
     featured = merge_macro_features(featured)
     labeled = compute_forward_returns(featured, horizon=5)

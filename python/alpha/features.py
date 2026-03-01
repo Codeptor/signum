@@ -200,6 +200,7 @@ def _scrub_infinities(df: pd.DataFrame) -> pd.DataFrame:
 def compute_alpha_features(
     df: pd.DataFrame,
     winsorize_bounds: Optional[dict[str, tuple[float, float]]] = None,
+    skip_winsorize: bool = False,
 ) -> pd.DataFrame:
     """Compute technical features per ticker.
 
@@ -212,12 +213,22 @@ def compute_alpha_features(
     C-WINS fix: accepts optional pre-computed winsorize bounds so that
     inference uses the same clipping thresholds as training.
 
+    P0-6 fix: added ``skip_winsorize`` flag.  The training pipeline manages
+    its own per-fold winsorization (train-only bounds → apply to both
+    train & test).  Without this flag, features were double-winsorized:
+    once here (from data quantiles) and again in the CV loop, causing
+    train/serve skew because inference only winsorizes once (here, with
+    saved training bounds).
+
     Args:
         df: Long-format OHLCV DataFrame with a ``ticker`` column.
         winsorize_bounds: Optional dict of {col: (lo, hi)} from training.
             If None, bounds are computed from the current data (training
             behaviour).  Pass the output of ``load_winsorize_bounds()``
             at inference time for consistency.
+        skip_winsorize: If True, skip the winsorize step entirely.
+            Used by the training pipeline which handles winsorization
+            itself with per-fold train-only bounds.
     """
     results = []
     for ticker, group in df.groupby("ticker"):
@@ -228,7 +239,9 @@ def compute_alpha_features(
 
     # H7 fix: winsorize all feature columns after computation, not piecemeal
     # C-WINS fix: use pre-computed bounds when available
-    out = winsorize(out, bounds=winsorize_bounds)
+    # P0-6 fix: training pipeline skips this — it manages winsorization itself
+    if not skip_winsorize:
+        out = winsorize(out, bounds=winsorize_bounds)
 
     return out
 
