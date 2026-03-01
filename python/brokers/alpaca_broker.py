@@ -127,8 +127,21 @@ class AlpacaBroker(BaseBroker):
         logger.info("Disconnected from Alpaca")
 
     def is_connected(self) -> bool:
-        """Check if connected to Alpaca."""
-        return self._connected
+        """Check if connected to Alpaca.
+
+        P0-5 fix: actually probe the API instead of trusting a stale boolean.
+        On a VPS running for weeks, sessions expire, auth gets revoked, and
+        network drops. A stale True flag would let operations fail repeatedly.
+        """
+        if not self._connected:
+            return False
+        try:
+            self.api.get_account()
+            return True
+        except Exception:
+            logger.warning("Alpaca connection health check failed — marking disconnected.")
+            self._connected = False
+            return False
 
     @_retry_read
     def get_account(self) -> BrokerAccount:
