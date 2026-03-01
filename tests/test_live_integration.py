@@ -231,14 +231,23 @@ class TestRunTradingCycleIntegration:
         ]
         # 3 buys = 3 OCO orders (each contains SL + TP)
         assert len(oco_orders) == 3
-        # R3-E-8 fix: OCO no longer sets redundant limit_price on parent.
-        # TP is conveyed via take_profit_limit_price, SL via stop_loss_stop_price.
+        # P0-OCO fix: Alpaca OCO requires limit_price on the parent order
+        # (the parent IS the take-profit leg). Both limit_price and
+        # take_profit_limit_price must be set to the TP price.
         for oco in oco_orders:
             assert oco.take_profit_limit_price is not None, (
                 f"OCO for {oco.symbol} missing take_profit_limit_price"
             )
             assert oco.stop_loss_stop_price is not None, (
                 f"OCO for {oco.symbol} missing SL stop_price"
+            )
+            assert oco.limit_price is not None, (
+                f"OCO for {oco.symbol} missing limit_price on parent "
+                f"(Alpaca rejects OCO without it)"
+            )
+            assert oco.limit_price == oco.take_profit_limit_price, (
+                f"OCO parent limit_price ({oco.limit_price}) must match "
+                f"take_profit_limit_price ({oco.take_profit_limit_price})"
             )
 
     @patch("examples.live_bot.get_ml_weights")
@@ -506,6 +515,8 @@ class TestSLTPAttachment:
         # OCO order has TP as take_profit_limit_price and SL as stop_loss_stop_price
         assert oco_orders[0].stop_loss_stop_price == expected_sl
         assert oco_orders[0].take_profit_limit_price == expected_tp
+        # P0-OCO fix: parent limit_price must be set for Alpaca to accept OCO
+        assert oco_orders[0].limit_price == expected_tp
 
     @patch("examples.live_bot.get_ml_weights")
     @patch("time.sleep", return_value=None)

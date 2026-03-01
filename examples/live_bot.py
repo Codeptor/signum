@@ -991,13 +991,16 @@ def run_trading_cycle(
                     # C1/C-OCO-1 fix: submit SL+TP as OCO pair (one-cancels-other).
                     # When SL fills, TP is automatically cancelled (and vice versa),
                     # preventing orphaned orders from creating naked short positions.
-                    # R3-E-8 fix: remove redundant limit_price on parent —
-                    # OCO legs define their own prices via take_profit/stop_loss.
+                    # P0-OCO fix: Alpaca OCO requires parent type="limit" with a
+                    # limit_price matching the take-profit price. The parent order
+                    # IS the take-profit leg; the stop-loss is a child. Without
+                    # limit_price, Alpaca rejects with "limit_price is required".
                     oco_order = BrokerOrder(
                         symbol=entry["symbol"],
                         side="sell",
                         qty=sl_tp_qty,
                         order_type="limit",
+                        limit_price=tp_price,
                         time_in_force="gtc",
                         order_class="oco",
                         take_profit_limit_price=tp_price,
