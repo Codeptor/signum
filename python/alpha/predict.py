@@ -84,8 +84,8 @@ _last_drift_report: dict | None = None
 # Module-level reference to the raw OHLCV fetched during the ML pipeline.
 # The live bot can access this to compute ATR without refetching.
 _last_raw_ohlcv: pd.DataFrame | None = None
-# Prediction scores for top-N stocks — used for confidence-weighted bet sizing.
-_last_prediction_scores: dict[str, float] | None = None
+# P1-10 fix: _last_prediction_scores global removed.  rank_stocks() now
+# returns (tickers, scores) tuple — explicit data flow, no hidden state.
 
 
 def _persist_ohlcv_cache(raw_ohlcv: pd.DataFrame) -> None:
@@ -642,10 +642,15 @@ def rank_stocks(
     model: CrossSectionalModel | ModelEnsemble,
     featured_df: pd.DataFrame,
     top_n: int = 10,
-) -> list[str]:
-    """Use the trained model to rank stocks and return top N tickers.
+) -> tuple[list[str], dict[str, float]]:
+    """Use the trained model to rank stocks and return top N tickers + scores.
 
     Only uses the most recent date's cross-section for ranking.
+
+    P1-10 fix: returns (tickers, prediction_scores) tuple instead of
+    writing scores to a global variable.  The old global state was fragile
+    (race conditions if ever parallelized, stale scores on error paths,
+    invisible data flow).
 
     Handles missing features gracefully: if the model was trained with
     features that aren't available at inference time (e.g. 'vix' when
@@ -675,7 +680,7 @@ def rank_stocks(
 
     if len(latest) == 0:
         logger.error("No valid data for prediction on latest date")
-        return []
+        return [], {}
 
     # Predict raw scores (not ranks — we just need to sort)
     scores = model.predict(latest)
@@ -723,11 +728,9 @@ def rank_stocks(
     top = score_series.nlargest(top_n)
     logger.info(f"Top {top_n} stocks by ML score:\n{top}")
 
-    # Store prediction scores for confidence-weighted bet sizing
-    global _last_prediction_scores
-    _last_prediction_scores = top.to_dict()
-
-    return list(top.index)
+    # P1-10 fix: return scores alongside tickers instead of storing in global
+    prediction_scores = top.to_dict()
+    return list(top.index), prediction_scores
 
 
 def apply_confidence_sizing(
@@ -1043,7 +1046,9 @@ def get_ml_weights(
         except Exception as e:
             logger.warning(f"MLflow drift logging failed (non-fatal): {e}")
 
-    top_tickers = rank_stocks(model, featured, top_n=top_n)
+    # P1-10 fix: rank_stocks now returns (tickers, scores) tuple instead
+    # of storing scores in a global variable.
+    top_tickers, prediction_scores = rank_stocks(model, featured, top_n=top_n)
 
     if not top_tickers:
         logger.error("ML pipeline produced no stock picks — aborting")
@@ -1064,7 +1069,7 @@ def get_ml_weights(
     # Tilts HRP weights toward higher-conviction picks using model scores.
     weights = apply_confidence_sizing(
         weights,
-        prediction_scores=_last_prediction_scores,
+        prediction_scores=prediction_scores,
         blend_alpha=0.3,
     )
 

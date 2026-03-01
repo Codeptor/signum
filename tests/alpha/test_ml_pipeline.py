@@ -183,9 +183,11 @@ class TestRankStocks:
 
         mock_model.predict.side_effect = predict_side_effect
 
-        top = rank_stocks(mock_model, featured, top_n=3)
+        top, scores = rank_stocks(mock_model, featured, top_n=3)
         assert len(top) == 3
         assert all(isinstance(t, str) for t in top)
+        assert isinstance(scores, dict)
+        assert len(scores) == 3
 
     def test_returns_empty_when_no_valid_data(self):
         """When all feature data is NaN, should return empty list."""
@@ -205,8 +207,9 @@ class TestRankStocks:
         mock_model = MagicMock()
         mock_model.feature_cols = FEATURE_COLS
 
-        result = rank_stocks(mock_model, all_nan_df, top_n=5)
+        result, scores = rank_stocks(mock_model, all_nan_df, top_n=5)
         assert result == []
+        assert scores == {}
 
 
 # ===========================================================================
@@ -338,7 +341,11 @@ class TestGetMlWeightsOrchestration:
         mock_reshape.return_value = long_df
 
         mock_features.return_value = MagicMock()  # featured data
-        mock_rank.return_value = ["AAPL", "MSFT", "GOOG"]
+        # P1-10: rank_stocks now returns (tickers, scores) tuple
+        mock_rank.return_value = (
+            ["AAPL", "MSFT", "GOOG"],
+            {"AAPL": 0.05, "MSFT": 0.03, "GOOG": 0.01},
+        )
         mock_optimize.return_value = {"AAPL": 0.4, "MSFT": 0.35, "GOOG": 0.25}
 
         weights, stale_data = get_ml_weights(top_n=3, method="hrp")
@@ -390,7 +397,7 @@ class TestGetMlWeightsOrchestration:
         mock_reshape.return_value = long_df
 
         mock_features.return_value = MagicMock()
-        mock_rank.return_value = []  # no picks
+        mock_rank.return_value = ([], {})  # no picks
 
         weights, stale_data = get_ml_weights(top_n=10)
         assert weights == {}

@@ -205,10 +205,11 @@ class TestRankStocksFillsMissingFeatures:
         )
 
         # Should not crash
-        result = rank_stocks(mock_model, df, top_n=2)
+        result, scores = rank_stocks(mock_model, df, top_n=2)
 
         assert isinstance(result, list)
         assert len(result) == 2
+        assert isinstance(scores, dict)
 
 
 # =====================================================================
