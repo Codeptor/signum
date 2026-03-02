@@ -1186,7 +1186,7 @@ function DualEquityChart({
 
 // ── Live Session Chart ──────────────────────────────────────────────────
 
-type SessionMode = "pnl" | "equity";
+type SessionMode = "pnl" | "return";
 
 const liveChartConfig = {
   a: { label: "Bot A", color: "hsl(160 60% 50%)" },
@@ -1210,18 +1210,24 @@ function LiveSessionChart({
         b: pt.b != null ? +(pt.b - STARTING_EQUITY).toFixed(2) : null,
       }));
     }
-    return data;
+    // return % = (equity - 100K) / 100K * 100
+    return data.map((pt) => ({
+      time: pt.time,
+      a: pt.a != null ? +((pt.a - STARTING_EQUITY) / STARTING_EQUITY * 100).toFixed(4) : null,
+      b: pt.b != null ? +((pt.b - STARTING_EQUITY) / STARTING_EQUITY * 100).toFixed(4) : null,
+    }));
   }, [data, mode]);
 
-  // Tight Y domain — pad by 10% of spread so tiny moves are visible
+  // Tight Y domain — pad so tiny moves are visible
   const yDomain = React.useMemo((): [number, number] => {
     const vals = chartData.flatMap((pt) => [pt.a, pt.b]).filter((v): v is number => v != null);
-    if (vals.length === 0) return mode === "pnl" ? [-100, 100] : [STARTING_EQUITY - 100, STARTING_EQUITY + 100];
+    // Sensible fallback before data arrives
+    if (vals.length === 0) return mode === "pnl" ? [-100, 100] : [-0.1, 0.1];
     const lo = Math.min(...vals);
     const hi = Math.max(...vals);
     const spread = hi - lo;
-    // Minimum visible spread: $20 in P&L mode, $50 in equity mode
-    const minSpread = mode === "pnl" ? 20 : 50;
+    // Floor spread: $20 / 0.02% so chart isn't a totally flat line when market barely moves
+    const minSpread = mode === "pnl" ? 20 : 0.02;
     const pad = Math.max(spread * 0.15, minSpread / 2);
     return [lo - pad, hi + pad];
   }, [chartData, mode]);
@@ -1255,7 +1261,7 @@ function LiveSessionChart({
     <div className="space-y-3">
       {/* Toggle */}
       <div className="flex items-center gap-1 rounded-md border border-border p-0.5 w-fit">
-        {(["pnl", "equity"] as SessionMode[]).map((m) => (
+        {(["pnl", "return"] as SessionMode[]).map((m) => (
           <button
             key={m}
             onClick={() => setMode(m)}
@@ -1265,7 +1271,7 @@ function LiveSessionChart({
                 : "text-muted-foreground hover:text-foreground"
             }`}
           >
-            {m === "pnl" ? "P&L Δ" : "Equity"}
+            {m === "pnl" ? "P&L Δ" : "Return %"}
           </button>
         ))}
       </div>
@@ -1293,13 +1299,13 @@ function LiveSessionChart({
           return (
             <>
               {aVal != null && (
-                <span className={`ml-auto tabular-nums font-medium ${aVal >= (mode === "pnl" ? 0 : STARTING_EQUITY) ? "text-green-500" : "text-red-500"}`}>
-                  A: {mode === "pnl" ? `${aVal >= 0 ? "+" : ""}$${Math.abs(aVal).toFixed(0)}` : `$${(aVal / 1000).toFixed(1)}k`}
+                <span className={`ml-auto tabular-nums font-medium ${aVal >= 0 ? "text-green-500" : "text-red-500"}`}>
+                  A: {aVal >= 0 ? "+" : ""}{mode === "pnl" ? `$${Math.abs(aVal).toFixed(0)}` : `${aVal.toFixed(3)}%`}
                 </span>
               )}
               {bVal != null && (
-                <span className={`tabular-nums font-medium ${bVal >= (mode === "pnl" ? 0 : STARTING_EQUITY) ? "text-green-500" : "text-red-500"}`}>
-                  B: {mode === "pnl" ? `${bVal >= 0 ? "+" : ""}$${Math.abs(bVal).toFixed(0)}` : `$${(bVal / 1000).toFixed(1)}k`}
+                <span className={`tabular-nums font-medium ${bVal >= 0 ? "text-green-500" : "text-red-500"}`}>
+                  B: {bVal >= 0 ? "+" : ""}{mode === "pnl" ? `$${Math.abs(bVal).toFixed(0)}` : `${bVal.toFixed(3)}%`}
                 </span>
               )}
             </>
@@ -1338,17 +1344,15 @@ function LiveSessionChart({
             tickFormatter={(v: number) =>
               mode === "pnl"
                 ? `${v >= 0 ? "+" : ""}$${v.toFixed(0)}`
-                : `$${(v / 1000).toFixed(2)}k`
+                : `${v >= 0 ? "+" : ""}${v.toFixed(3)}%`
             }
           />
-          {mode === "pnl" && (
-            <ReferenceLine
-              y={0}
-              stroke="var(--border)"
-              strokeDasharray="3 3"
-              strokeWidth={1}
-            />
-          )}
+          <ReferenceLine
+            y={0}
+            stroke="var(--border)"
+            strokeDasharray="3 3"
+            strokeWidth={1}
+          />
           <ChartTooltip
             content={
               <ChartTooltipContent
@@ -1358,7 +1362,7 @@ function LiveSessionChart({
                   const display =
                     mode === "pnl"
                       ? `${v >= 0 ? "+" : ""}$${Math.abs(v).toFixed(2)}`
-                      : `$${v.toLocaleString("en-US", { minimumFractionDigits: 2 })}`;
+                      : `${v >= 0 ? "+" : ""}${v.toFixed(4)}%`;
                   return (
                     <span className="tabular-nums">
                       {label}: {display}
