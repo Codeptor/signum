@@ -1234,8 +1234,9 @@ function LiveSessionChart({
     );
   }
 
-  // Ticks: show at most 8 evenly-spaced labels so they don't crowd
-  const tickInterval = Math.max(1, Math.floor(chartData.length / 8));
+  // Fixed tick every 4 points (= 2 min at 30s intervals) so labels
+  // accumulate naturally as data grows instead of staying pinned at 8.
+  const TICK_EVERY = 4;
 
   return (
     <div className="space-y-3">
@@ -1310,7 +1311,8 @@ function LiveSessionChart({
             tickLine={false}
             axisLine={false}
             fontSize={9}
-            interval={tickInterval - 1}
+            interval={TICK_EVERY - 1}
+            tickFormatter={(v: string) => v.slice(0, 5)}
             tick={{ fill: "var(--muted-foreground)" }}
           />
           <YAxis
