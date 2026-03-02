@@ -1216,31 +1216,25 @@ function LiveSessionChart({
 }) {
   const [mode, setMode] = React.useState<SessionMode>("pnl");
 
-  // Derive chart data from the raw equity readings
+  // Derive chart data from the raw equity readings.
+  // ALL THREE keys (a, b, spread) are always present — unused ones are null.
+  // This keeps the AreaChart's child tree identical across mode switches so
+  // Recharts never loses its measured dimensions.
   const chartData = React.useMemo(() => {
     if (data.length === 0) return [];
-    if (mode === "pnl") {
-      return data.map((pt) => ({
+    return data.map((pt) => {
+      const pnlA = pt.a != null ? +(pt.a - STARTING_EQUITY).toFixed(2) : null;
+      const pnlB = pt.b != null ? +(pt.b - STARTING_EQUITY).toFixed(2) : null;
+      const retA = pt.a != null ? +((pt.a - STARTING_EQUITY) / STARTING_EQUITY * 100).toFixed(4) : null;
+      const retB = pt.b != null ? +((pt.b - STARTING_EQUITY) / STARTING_EQUITY * 100).toFixed(4) : null;
+      const sp   = pt.a != null && pt.b != null ? +(pt.b - pt.a).toFixed(2) : null;
+      return {
         time: pt.time,
-        a: pt.a != null ? +(pt.a - STARTING_EQUITY).toFixed(2) : null,
-        b: pt.b != null ? +(pt.b - STARTING_EQUITY).toFixed(2) : null,
-      }));
-    }
-    if (mode === "spread") {
-      // Spread = Bot B equity − Bot A equity (positive = B is ahead)
-      return data.map((pt) => ({
-        time: pt.time,
-        a: null as number | null,
-        b: null as number | null,
-        spread: pt.a != null && pt.b != null ? +(pt.b - pt.a).toFixed(2) : null,
-      }));
-    }
-    // return % = (equity - 100K) / 100K * 100
-    return data.map((pt) => ({
-      time: pt.time,
-      a: pt.a != null ? +((pt.a - STARTING_EQUITY) / STARTING_EQUITY * 100).toFixed(4) : null,
-      b: pt.b != null ? +((pt.b - STARTING_EQUITY) / STARTING_EQUITY * 100).toFixed(4) : null,
-    }));
+        a:      mode === "pnl" ? pnlA : mode === "return" ? retA : null,
+        b:      mode === "pnl" ? pnlB : mode === "return" ? retB : null,
+        spread: mode === "spread" ? sp : null,
+      };
+    });
   }, [data, mode]);
 
   // Tight Y domain — pad so tiny moves are visible
@@ -1438,42 +1432,40 @@ function LiveSessionChart({
               />
             }
           />
-          {mode === "spread" ? (
-            <Area
-              type="monotone"
-              dataKey="spread"
-              stroke="hsl(38 90% 58%)"
-              strokeWidth={1.5}
-              fill="url(#liveGradSpread)"
-              connectNulls
-              dot={false}
-              isAnimationActive={false}
-            />
-          ) : (
-            <>
-              <Area
-                type="monotone"
-                dataKey="a"
-                stroke="hsl(160 60% 50%)"
-                strokeWidth={1.5}
-                fill="url(#liveGradA)"
-                connectNulls
-                dot={false}
-                isAnimationActive={false}
-              />
-              <Area
-                type="monotone"
-                dataKey="b"
-                stroke="hsl(213 80% 58%)"
-                strokeWidth={1.5}
-                strokeDasharray="4 3"
-                fill="url(#liveGradB)"
-                connectNulls
-                dot={false}
-                isAnimationActive={false}
-              />
-            </>
-          )}
+          {/* Always render all three Areas — unused keys are null so they
+              render nothing, but the stable child tree prevents Recharts
+              from losing its measured dimensions on mode switch. */}
+          <Area
+            type="monotone"
+            dataKey="a"
+            stroke="hsl(160 60% 50%)"
+            strokeWidth={1.5}
+            fill="url(#liveGradA)"
+            connectNulls
+            dot={false}
+            isAnimationActive={false}
+          />
+          <Area
+            type="monotone"
+            dataKey="b"
+            stroke="hsl(213 80% 58%)"
+            strokeWidth={1.5}
+            strokeDasharray="4 3"
+            fill="url(#liveGradB)"
+            connectNulls
+            dot={false}
+            isAnimationActive={false}
+          />
+          <Area
+            type="monotone"
+            dataKey="spread"
+            stroke="hsl(38 90% 58%)"
+            strokeWidth={1.5}
+            fill="url(#liveGradSpread)"
+            connectNulls
+            dot={false}
+            isAnimationActive={false}
+          />
         </AreaChart>
       </ChartContainer>
     </div>
