@@ -1379,7 +1379,6 @@ const MA_WINDOW = 5;
 const liveChartConfig = {
   a:         { label: "Bot A",   color: "hsl(160 60% 50%)" },
   b:         { label: "Bot B",   color: "hsl(213 80% 58%)" },
-  spy:       { label: "SPY",     color: "hsl(0 0% 60%)"    },
   pos_a:     { label: "Pos A",   color: "hsl(160 60% 50%)" },
   pos_b:     { label: "Pos B",   color: "hsl(213 80% 58%)" },
   ma_a:      { label: "MA A",    color: "hsl(160 60% 50%)" },
@@ -1496,17 +1495,10 @@ function LiveSessionChart({
   // Stable key count prevents Recharts losing measured dimensions on switch.
   const chartData = React.useMemo(() => {
     if (windowedData.length === 0) return [];
-    // Find first non-null spy_dd in window (anchor for delta calc)
-    const spyDdStart = (windowedData.find((p) => (p as { spy_dd?: number | null }).spy_dd != null) as { spy_dd?: number | null } | undefined)?.spy_dd ?? null;
     const pts = windowedData.map((pt) => {
-      const pnlA   = pt.a != null ? +(pt.a - STARTING_EQUITY).toFixed(2) : null;
-      const pnlB   = pt.b != null ? +(pt.b - STARTING_EQUITY).toFixed(2) : null;
-      const sp     = pt.a != null && pt.b != null ? +(pt.b - pt.a).toFixed(2) : null;
-      const ptSpyDd = (pt as { spy_dd?: number | null }).spy_dd ?? null;
-      // SPY P&L equivalent: treat $100k as benchmark; delta from session-start spy_dd
-      const spyPnl = mode === "pnl" && ptSpyDd != null && spyDdStart != null
-        ? +((ptSpyDd - spyDdStart) * 100_000).toFixed(2)
-        : null;
+      const pnlA = pt.a != null ? +(pt.a - STARTING_EQUITY).toFixed(2) : null;
+      const pnlB = pt.b != null ? +(pt.b - STARTING_EQUITY).toFixed(2) : null;
+      const sp   = pt.a != null && pt.b != null ? +(pt.b - pt.a).toFixed(2) : null;
       const posA = (pt as { pos_a?: number | null }).pos_a ?? null;
       const posB = (pt as { pos_b?: number | null }).pos_b ?? null;
       return {
@@ -1514,7 +1506,6 @@ function LiveSessionChart({
         a:      mode === "pnl"    ? pnlA : null,
         b:      mode === "pnl"    ? pnlB : null,
         spread: mode === "spread" ? sp   : null,
-        spy:    spyPnl,
         pos_a:  posA,
         pos_b:  posB,
       };
@@ -1857,16 +1848,6 @@ function LiveSessionChart({
               />
               Bot B
             </span>
-            <span className="flex items-center gap-1.5">
-              <span
-                className="inline-block h-0.5 w-4 rounded-full"
-                style={{
-                  backgroundColor: "hsl(0 0% 55%)",
-                  backgroundImage: "repeating-linear-gradient(90deg, hsl(0 0% 55%) 0 2px, transparent 2px 6px)",
-                }}
-              />
-              <span className="text-muted-foreground">SPY</span>
-            </span>
           </>
         ) : (
           <span className="flex items-center gap-1.5">
@@ -1969,8 +1950,6 @@ function LiveSessionChart({
                   const v = Number(value);
                   if (k === "spread")
                     return <span className="tabular-nums">B−A: {v >= 0 ? "+" : ""}${v.toFixed(2)}</span>;
-                  if (k === "spy")
-                    return <span className="tabular-nums text-muted-foreground">SPY: {v >= 0 ? "+" : ""}${v.toFixed(2)}</span>;
                   const label = k === "a" ? "Bot A" : "Bot B";
                   return (
                     <span className="tabular-nums">
@@ -1985,8 +1964,6 @@ function LiveSessionChart({
           <Area yAxisId="pnl" type="monotone" dataKey="a"      stroke="hsl(160 60% 50%)" strokeWidth={1.5} fill="url(#liveGradA)"      connectNulls dot={false} isAnimationActive={false} />
           <Area yAxisId="pnl" type="monotone" dataKey="b"      stroke="hsl(213 80% 58%)" strokeWidth={1.5} fill="url(#liveGradB)"      connectNulls dot={false} isAnimationActive={false} strokeDasharray="4 3" />
           <Area yAxisId="pnl" type="monotone" dataKey="spread" stroke="hsl(38 90% 58%)"  strokeWidth={1.5} fill="url(#liveGradSpread)" connectNulls dot={false} isAnimationActive={false} />
-          {/* SPY benchmark line — gray, always rendered; null when in spread mode */}
-          <Line yAxisId="pnl" type="monotone" dataKey="spy" stroke="hsl(0 0% 55%)" strokeWidth={1} strokeOpacity={0.6} strokeDasharray="2 4" dot={false} isAnimationActive={false} connectNulls />
           {/* MA overlay lines — always rendered; null data = invisible */}
           <Line yAxisId="pnl" type="monotone" dataKey="ma_a"      stroke="hsl(160 60% 50%)" strokeWidth={1} strokeOpacity={0.7} strokeDasharray="3 2" dot={false} isAnimationActive={false} connectNulls />
           <Line yAxisId="pnl" type="monotone" dataKey="ma_b"      stroke="hsl(213 80% 58%)" strokeWidth={1} strokeOpacity={0.7} strokeDasharray="3 2" dot={false} isAnimationActive={false} connectNulls />
