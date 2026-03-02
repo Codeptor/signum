@@ -405,7 +405,7 @@ export default function DashboardPage() {
           time,
           a: eqA != null ? +eqA.toFixed(2) : null,
           b: eqB != null ? +eqB.toFixed(2) : null,
-        }].slice(-200)        // ~100 min of 30s ticks
+        }].slice(-10_000)     // ~83 days of 30s ticks, ~500KB in localStorage
       );
     }
   }, [prevRegimeA, prevRegimeB]);
