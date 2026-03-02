@@ -1,9 +1,8 @@
 "use client";
 
-import { useState, useCallback } from "react";
-import { fetchStatus, fetchHealth, fetchEquity } from "@/lib/api";
-import { storeSessionPoint } from "@/lib/api";
-import { StatusData, EquityPoint, MarketSession, SessionPoint } from "@/types/dashboard";
+import { useState, useCallback, useRef } from "react";
+import { fetchStatus, fetchHealth, fetchEquity, storeSessionPoint } from "@/lib/api";
+import { StatusData, EquityPoint, SessionPoint } from "@/types/dashboard";
 import { SESSION_POINT_LIMIT } from "@/lib/constants";
 import { getMarketStatus } from "@/lib/market-utils";
 
@@ -19,8 +18,6 @@ export interface ComparisonDataState {
 export interface UseComparisonDataReturn extends ComparisonDataState {
   loadComparison: () => Promise<void>;
   loadEquityCurves: () => Promise<void>;
-  checkAndNotifyRegimeChange: (prevRegimeA: string | null, prevRegimeB: string | null) => 
-    { newRegimeA: string | null; newRegimeB: string | null };
   accumulateSessionPoints: (currentPoints: SessionPoint[]) => SessionPoint[];
 }
 
@@ -36,6 +33,14 @@ export function useComparisonData(
     equityB: [],
   });
 
+  // Always-fresh mirror of latest state — lets callbacks read current values
+  // without becoming stale or needing state in their dep arrays
+  const stateRef = useRef(state);
+
+  // Regime change tracking — owned entirely inside this hook
+  const prevRegimeARef = useRef<string | null>(null);
+  const prevRegimeBRef = useRef<string | null>(null);
+
   const loadComparison = useCallback(async () => {
     const [sA, sB, hA, hB] = await Promise.all([
       fetchStatus("bot-a"),
@@ -44,14 +49,40 @@ export function useComparisonData(
       fetchHealth("bot-b"),
     ]);
 
-    setState((prev) => ({
-      ...prev,
+    // Regime change notifications — use fresh API data, not stale state
+    const regimeA = sA?.regime?.regime;
+    const regimeB = sB?.regime?.regime;
+
+    if (
+      prevRegimeARef.current &&
+      regimeA &&
+      regimeA !== prevRegimeARef.current &&
+      regimeA !== "normal"
+    ) {
+      onNotify(`Bot A regime: ${regimeA.toUpperCase()}`);
+    }
+    prevRegimeARef.current = regimeA ?? null;
+
+    if (
+      prevRegimeBRef.current &&
+      regimeB &&
+      regimeB !== prevRegimeBRef.current &&
+      regimeB !== "normal"
+    ) {
+      onNotify(`Bot B regime: ${regimeB.toUpperCase()}`);
+    }
+    prevRegimeBRef.current = regimeB ?? null;
+
+    const newState: ComparisonDataState = {
+      ...stateRef.current,
       statusA: sA,
       statusB: sB,
       healthA: hA != null,
       healthB: hB != null,
-    }));
-  }, []);
+    };
+    stateRef.current = newState;
+    setState(newState);
+  }, [onNotify]);
 
   const loadEquityCurves = useCallback(async () => {
     const [eA, eB] = await Promise.all([
@@ -59,49 +90,26 @@ export function useComparisonData(
       fetchEquity("bot-b"),
     ]);
 
-    setState((prev) => ({
-      ...prev,
+    const newState: ComparisonDataState = {
+      ...stateRef.current,
       equityA: eA,
       equityB: eB,
-    }));
+    };
+    stateRef.current = newState;
+    setState(newState);
   }, []);
 
-  const checkAndNotifyRegimeChange = useCallback(
-    (prevRegimeA: string | null, prevRegimeB: string | null) => {
-      const regimeA = state.statusA?.regime?.regime;
-      const regimeB = state.statusB?.regime?.regime;
-
-      if (
-        prevRegimeA &&
-        regimeA &&
-        regimeA !== prevRegimeA &&
-        regimeA !== "normal"
-      ) {
-        onNotify(`Bot A regime: ${regimeA.toUpperCase()}`);
-      }
-      if (
-        prevRegimeB &&
-        regimeB &&
-        regimeB !== prevRegimeB &&
-        regimeB !== "normal"
-      ) {
-        onNotify(`Bot B regime: ${regimeB.toUpperCase()}`);
-      }
-
-      return { newRegimeA: regimeA ?? null, newRegimeB: regimeB ?? null };
-    },
-    [state.statusA?.regime?.regime, state.statusB?.regime?.regime, onNotify]
-  );
-
+  // Reads from stateRef — stable reference, no state in dep array
   const accumulateSessionPoints = useCallback(
     (currentPoints: SessionPoint[]): SessionPoint[] => {
       const market = getMarketStatus(new Date());
-      if (market.session !== "Open" as MarketSession) {
+      if (market.session !== "Open") {
         return currentPoints;
       }
 
-      const eqA = state.statusA?.account?.equity;
-      const eqB = state.statusB?.account?.equity;
+      const { statusA, statusB } = stateRef.current;
+      const eqA = statusA?.account?.equity;
+      const eqB = statusB?.account?.equity;
 
       if (eqA == null && eqB == null) {
         return currentPoints;
@@ -117,11 +125,11 @@ export function useComparisonData(
       });
 
       const spyDd =
-        state.statusA?.regime?.spy_drawdown ??
-        state.statusB?.regime?.spy_drawdown ??
+        statusA?.regime?.spy_drawdown ??
+        statusB?.regime?.spy_drawdown ??
         null;
-      const posA = state.statusA?.positions_count ?? null;
-      const posB = state.statusB?.positions_count ?? null;
+      const posA = statusA?.positions_count ?? null;
+      const posB = statusB?.positions_count ?? null;
 
       // Persist to Postgres (fire-and-forget)
       storeSessionPoint(
@@ -145,14 +153,13 @@ export function useComparisonData(
         },
       ].slice(-SESSION_POINT_LIMIT);
     },
-    [state.statusA, state.statusB]
+    [] // no deps — reads stateRef which is always current
   );
 
   return {
     ...state,
     loadComparison,
     loadEquityCurves,
-    checkAndNotifyRegimeChange,
     accumulateSessionPoints,
   };
 }

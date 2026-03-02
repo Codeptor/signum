@@ -28,9 +28,7 @@ export default function DashboardPage() {
   // ── State ───────────────────────────────────────────────────────────────
   const [bot, setBot] = React.useState<BotId>("bot-a");
   const [now, setNow] = React.useState<Date>(new Date());
-  const [lastRefresh, setLastRefresh] = React.useState<Date>(new Date());
-  const [prevRegimeA, setPrevRegimeA] = React.useState<string | null>(null);
-  const [prevRegimeB, setPrevRegimeB] = React.useState<string | null>(null);
+  const [lastRefresh, setLastRefresh] = React.useState<Date | null>(null);
 
   // ── Hooks ───────────────────────────────────────────────────────────────
   const { notify } = useNotifications();
@@ -38,37 +36,23 @@ export default function DashboardPage() {
   const { data: botData, loadBot, refresh } = useBotData();
   const comparison = useComparisonData(notify);
 
+  // Destructure stable callbacks so handleRefresh dep array has no object refs
+  const { loadComparison, loadEquityCurves, accumulateSessionPoints } = comparison;
+
   const market = getMarketStatus(now);
 
   // ── Handlers ────────────────────────────────────────────────────────────
 
   const handleRefresh = React.useCallback(() => {
-    // Load comparison data
-    comparison.loadComparison().then(() => {
-      comparison.loadEquityCurves();
-
-      // Regime change notifications
-      const { newRegimeA, newRegimeB } = comparison.checkAndNotifyRegimeChange(
-        prevRegimeA,
-        prevRegimeB
-      );
-      if (newRegimeA) setPrevRegimeA(newRegimeA);
-      if (newRegimeB) setPrevRegimeB(newRegimeB);
-
-      // Accumulate session points
-      const newPoints = comparison.accumulateSessionPoints(sessionPoints);
-      if (newPoints.length > sessionPoints.length) {
-        setSessionPoints(newPoints);
-      }
-    });
-
-    // Load current bot data
+    loadComparison();
+    loadEquityCurves();
+    // Functional updater — no sessionPoints in dep array
+    setSessionPoints((prev) => accumulateSessionPoints(prev));
     refresh(bot);
-
     setLastRefresh(new Date());
-  }, [bot, comparison, prevRegimeA, prevRegimeB, refresh, sessionPoints, setSessionPoints]);
+  }, [bot, loadComparison, loadEquityCurves, accumulateSessionPoints, refresh, setSessionPoints]);
 
-  const { refreshIn, paused, setPaused, resetTimer } = useAutoRefresh(handleRefresh);
+  const { refreshIn, paused, togglePause } = useAutoRefresh(handleRefresh);
 
   const handleSwitchBot = React.useCallback((newBot: BotId) => {
     setBot(newBot);
@@ -94,10 +78,10 @@ export default function DashboardPage() {
     onSwitchBotA: () => setBot("bot-a"),
     onSwitchBotB: () => setBot("bot-b"),
     onRefresh: handleRefresh,
-    onTogglePause: () => setPaused(!paused),
+    onTogglePause: togglePause,
   });
 
-  // Initial load and auto-refresh
+  // Initial load
   React.useEffect(() => {
     handleRefresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -107,11 +91,6 @@ export default function DashboardPage() {
   React.useEffect(() => {
     loadBot(bot);
   }, [bot, loadBot]);
-
-  // Reset timer when handleRefresh changes
-  React.useEffect(() => {
-    resetTimer();
-  }, [resetTimer, handleRefresh]);
 
   // ── Render ──────────────────────────────────────────────────────────────
 

@@ -7,6 +7,7 @@ export interface UseAutoRefreshReturn {
   refreshIn: number;
   paused: boolean;
   setPaused: (paused: boolean) => void;
+  togglePause: () => void;
   resetTimer: () => void;
 }
 
@@ -14,23 +15,31 @@ export function useAutoRefresh(
   onRefresh: () => void,
   interval: number = AUTO_REFRESH_INTERVAL
 ): UseAutoRefreshReturn {
-  const [refreshIn, setRefreshIn] = useState(30);
+  const totalSeconds = Math.round(interval / 1000);
+  const [refreshIn, setRefreshIn] = useState(totalSeconds);
   const [paused, setPausedState] = useState(false);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const countdownRef = useRef<NodeJS.Timeout | null>(null);
+  // Stable ref so the interval closure never captures a stale value
+  const pausedRef = useRef(paused);
 
   const setPaused = useCallback((value: boolean) => {
+    pausedRef.current = value;
     setPausedState(value);
   }, []);
 
+  const togglePause = useCallback(() => {
+    setPaused(!pausedRef.current);
+  }, [setPaused]);
+
   const resetTimer = useCallback(() => {
-    setRefreshIn(30);
-  }, []);
+    setRefreshIn(totalSeconds);
+  }, [totalSeconds]);
 
   // 1-second countdown tick
   useEffect(() => {
     countdownRef.current = setInterval(() => {
-      setRefreshIn((prev) => (prev <= 1 ? 30 : prev - 1));
+      setRefreshIn((prev) => (prev <= 1 ? totalSeconds : prev - 1));
     }, 1000);
 
     return () => {
@@ -38,12 +47,12 @@ export function useAutoRefresh(
         clearInterval(countdownRef.current);
       }
     };
-  }, []);
+  }, [totalSeconds]);
 
-  // Auto-refresh interval
+  // Auto-refresh interval — stable, never recreated on pause toggle
   useEffect(() => {
     intervalRef.current = setInterval(() => {
-      if (!paused) {
+      if (!pausedRef.current) {
         onRefresh();
       }
     }, interval);
@@ -53,7 +62,7 @@ export function useAutoRefresh(
         clearInterval(intervalRef.current);
       }
     };
-  }, [onRefresh, interval, paused]);
+  }, [onRefresh, interval]); // paused intentionally excluded — read via pausedRef
 
-  return { refreshIn, paused, setPaused, resetTimer };
+  return { refreshIn, paused, setPaused, togglePause, resetTimer };
 }
