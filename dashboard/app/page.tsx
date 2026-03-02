@@ -47,7 +47,7 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from "@/components/ui/chart";
-import { Area, AreaChart, XAxis, YAxis } from "recharts";
+import { Area, AreaChart, ReferenceLine, XAxis, YAxis } from "recharts";
 import { SparklesIcon } from "@/components/ui/sparkles";
 import { ClockIcon } from "@/components/ui/clock";
 import { RefreshCWIcon } from "@/components/ui/refresh-cw";
@@ -308,6 +308,11 @@ export default function DashboardPage() {
   const [equityB, setEquityB] = React.useState<EquityPoint[]>([]);
   const [paused, setPaused] = React.useState(false);
 
+  // Live session accumulator — one point per 30s poll, reset on page load
+  const [sessionPoints, setSessionPoints] = React.useState<
+    Array<{ time: string; a: number | null; b: number | null }>
+  >([]);
+
   // Dynamic page title
   React.useEffect(() => {
     const eq = status?.account?.equity;
@@ -370,6 +375,26 @@ export default function DashboardPage() {
     setStatusB(sB);
     setHealthA(hA != null);
     setHealthB(hB != null);
+
+    // Accumulate live session equity — both bots, every poll
+    const eqA = sA?.account?.equity;
+    const eqB = sB?.account?.equity;
+    if (eqA != null || eqB != null) {
+      const time = new Date().toLocaleTimeString("en-US", {
+        timeZone: "America/New_York",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      });
+      setSessionPoints((prev) =>
+        [...prev, {
+          time,
+          a: eqA != null ? +eqA.toFixed(2) : null,
+          b: eqB != null ? +eqB.toFixed(2) : null,
+        }].slice(-200)        // ~100 min of 30s ticks
+      );
+    }
   }, [prevRegimeA, prevRegimeB]);
 
   const loadBot = React.useCallback(async (b: BotId) => {
@@ -694,6 +719,35 @@ export default function DashboardPage() {
             </CardContent>
           </Card>
         </div>
+
+        {/* ── Live Session P&L ─────────────────────────────────── */}
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle className="flex items-center gap-1.5">
+                  <ActivityIcon size={16} />
+                  Live Session
+                </CardTitle>
+                <CardDescription>
+                  Bot A vs B · sampled every 30s since page load
+                  {sessionPoints.length > 0 && ` · ${sessionPoints.length} pts`}
+                </CardDescription>
+              </div>
+              <div className="flex items-center gap-2">
+                {sessionPoints.length > 0 && (
+                  <span className="flex items-center gap-1 text-[10px] text-muted-foreground">
+                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-green-500 animate-pulse" />
+                    LIVE
+                  </span>
+                )}
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <LiveSessionChart data={sessionPoints} />
+          </CardContent>
+        </Card>
 
         {/* ── Sector Exposure ──────────────────────────────────── */}
         {positions.length > 0 && (
@@ -1114,6 +1168,201 @@ function DualEquityChart({
         />
       </AreaChart>
     </ChartContainer>
+  );
+}
+
+// ── Live Session Chart ──────────────────────────────────────────────────
+
+type SessionMode = "pnl" | "equity";
+
+const liveChartConfig = {
+  a: { label: "Bot A", color: "hsl(160 60% 50%)" },
+  b: { label: "Bot B", color: "hsl(213 80% 58%)" },
+} satisfies ChartConfig;
+
+function LiveSessionChart({
+  data,
+}: {
+  data: Array<{ time: string; a: number | null; b: number | null }>;
+}) {
+  const [mode, setMode] = React.useState<SessionMode>("pnl");
+
+  // Derive chart data from the raw equity readings
+  const chartData = React.useMemo(() => {
+    if (data.length === 0) return [];
+    if (mode === "pnl") {
+      return data.map((pt) => ({
+        time: pt.time,
+        a: pt.a != null ? +(pt.a - STARTING_EQUITY).toFixed(2) : null,
+        b: pt.b != null ? +(pt.b - STARTING_EQUITY).toFixed(2) : null,
+      }));
+    }
+    return data;
+  }, [data, mode]);
+
+  if (data.length < 2) {
+    return (
+      <div className="flex h-48 flex-col items-center justify-center gap-2">
+        <p className="text-xs text-muted-foreground">
+          {data.length === 0
+            ? "Waiting for first poll…"
+            : `Collecting data — ${data.length}/2 points`}
+        </p>
+        <div className="flex gap-1">
+          {[...Array(3)].map((_, i) => (
+            <span
+              key={i}
+              className="inline-block h-1 w-4 rounded-full bg-muted animate-pulse"
+              style={{ animationDelay: `${i * 200}ms` }}
+            />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  // Ticks: show at most 8 evenly-spaced labels so they don't crowd
+  const tickInterval = Math.max(1, Math.floor(chartData.length / 8));
+
+  return (
+    <div className="space-y-3">
+      {/* Toggle */}
+      <div className="flex items-center gap-1 rounded-md border border-border p-0.5 w-fit">
+        {(["pnl", "equity"] as SessionMode[]).map((m) => (
+          <button
+            key={m}
+            onClick={() => setMode(m)}
+            className={`rounded px-2.5 py-0.5 text-[11px] font-medium transition-colors ${
+              mode === m
+                ? "bg-foreground text-background"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            {m === "pnl" ? "P&L Δ" : "Equity"}
+          </button>
+        ))}
+      </div>
+
+      {/* Legend */}
+      <div className="flex items-center gap-4 text-[11px] text-muted-foreground">
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block h-0.5 w-4 rounded-full" style={{ backgroundColor: "hsl(160 60% 50%)" }} />
+          Bot A
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span
+            className="inline-block h-0.5 w-4 rounded-full"
+            style={{
+              backgroundColor: "hsl(213 80% 58%)",
+              backgroundImage: "repeating-linear-gradient(90deg, hsl(213 80% 58%) 0 4px, transparent 4px 7px)",
+            }}
+          />
+          Bot B
+        </span>
+        {chartData.length > 0 && (() => {
+          const last = chartData[chartData.length - 1];
+          const aVal = last.a;
+          const bVal = last.b;
+          return (
+            <>
+              {aVal != null && (
+                <span className={`ml-auto tabular-nums font-medium ${aVal >= (mode === "pnl" ? 0 : STARTING_EQUITY) ? "text-green-500" : "text-red-500"}`}>
+                  A: {mode === "pnl" ? `${aVal >= 0 ? "+" : ""}$${Math.abs(aVal).toFixed(0)}` : `$${(aVal / 1000).toFixed(1)}k`}
+                </span>
+              )}
+              {bVal != null && (
+                <span className={`tabular-nums font-medium ${bVal >= (mode === "pnl" ? 0 : STARTING_EQUITY) ? "text-green-500" : "text-red-500"}`}>
+                  B: {mode === "pnl" ? `${bVal >= 0 ? "+" : ""}$${Math.abs(bVal).toFixed(0)}` : `$${(bVal / 1000).toFixed(1)}k`}
+                </span>
+              )}
+            </>
+          );
+        })()}
+      </div>
+
+      <ChartContainer config={liveChartConfig} className="h-48 w-full">
+        <AreaChart data={chartData} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+          <defs>
+            <linearGradient id="liveGradA" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="hsl(160 60% 50%)" stopOpacity={0.18} />
+              <stop offset="100%" stopColor="hsl(160 60% 50%)" stopOpacity={0} />
+            </linearGradient>
+            <linearGradient id="liveGradB" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="hsl(213 80% 58%)" stopOpacity={0.18} />
+              <stop offset="100%" stopColor="hsl(213 80% 58%)" stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <XAxis
+            dataKey="time"
+            tickLine={false}
+            axisLine={false}
+            fontSize={9}
+            interval={tickInterval - 1}
+            tick={{ fill: "var(--muted-foreground)" }}
+          />
+          <YAxis
+            tickLine={false}
+            axisLine={false}
+            fontSize={9}
+            width={58}
+            tick={{ fill: "var(--muted-foreground)" }}
+            tickFormatter={(v: number) =>
+              mode === "pnl"
+                ? `${v >= 0 ? "+" : ""}$${v.toFixed(0)}`
+                : `$${(v / 1000).toFixed(1)}k`
+            }
+          />
+          {mode === "pnl" && (
+            <ReferenceLine
+              y={0}
+              stroke="var(--border)"
+              strokeDasharray="3 3"
+              strokeWidth={1}
+            />
+          )}
+          <ChartTooltip
+            content={
+              <ChartTooltipContent
+                formatter={(value, name) => {
+                  const v = Number(value);
+                  const label = String(name) === "a" ? "Bot A" : "Bot B";
+                  const display =
+                    mode === "pnl"
+                      ? `${v >= 0 ? "+" : ""}$${Math.abs(v).toFixed(2)}`
+                      : `$${v.toLocaleString("en-US", { minimumFractionDigits: 2 })}`;
+                  return (
+                    <span className="tabular-nums">
+                      {label}: {display}
+                    </span>
+                  );
+                }}
+              />
+            }
+          />
+          <Area
+            type="monotone"
+            dataKey="a"
+            stroke="hsl(160 60% 50%)"
+            strokeWidth={1.5}
+            fill="url(#liveGradA)"
+            connectNulls
+            dot={false}
+            isAnimationActive={false}
+          />
+          <Area
+            type="monotone"
+            dataKey="b"
+            stroke="hsl(213 80% 58%)"
+            strokeWidth={1.5}
+            strokeDasharray="4 3"
+            fill="url(#liveGradB)"
+            connectNulls
+            dot={false}
+            isAnimationActive={false}
+          />
+        </AreaChart>
+      </ChartContainer>
+    </div>
   );
 }
 
