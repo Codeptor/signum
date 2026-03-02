@@ -1213,6 +1213,19 @@ function LiveSessionChart({
     return data;
   }, [data, mode]);
 
+  // Tight Y domain — pad by 10% of spread so tiny moves are visible
+  const yDomain = React.useMemo((): [number, number] => {
+    const vals = chartData.flatMap((pt) => [pt.a, pt.b]).filter((v): v is number => v != null);
+    if (vals.length === 0) return mode === "pnl" ? [-100, 100] : [STARTING_EQUITY - 100, STARTING_EQUITY + 100];
+    const lo = Math.min(...vals);
+    const hi = Math.max(...vals);
+    const spread = hi - lo;
+    // Minimum visible spread: $20 in P&L mode, $50 in equity mode
+    const minSpread = mode === "pnl" ? 20 : 50;
+    const pad = Math.max(spread * 0.15, minSpread / 2);
+    return [lo - pad, hi + pad];
+  }, [chartData, mode]);
+
   if (data.length < 2) {
     return (
       <div className="flex h-48 flex-col items-center justify-center gap-2">
@@ -1320,11 +1333,12 @@ function LiveSessionChart({
             axisLine={false}
             fontSize={9}
             width={58}
+            domain={yDomain}
             tick={{ fill: "var(--muted-foreground)" }}
             tickFormatter={(v: number) =>
               mode === "pnl"
                 ? `${v >= 0 ? "+" : ""}$${v.toFixed(0)}`
-                : `$${(v / 1000).toFixed(1)}k`
+                : `$${(v / 1000).toFixed(2)}k`
             }
           />
           {mode === "pnl" && (
