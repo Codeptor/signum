@@ -1643,24 +1643,116 @@ def register_api_routes(app: dash.Dash) -> None:
     # ── GET /api/risk — full risk engine summary ──
     @server.route("/api/risk")
     def api_risk():
+        # Prefer backtest results if available (richer data)
         result = _load_backtest_results()
-        if result is None:
-            return _json_response({"error": "No backtest results for risk computation."}, 404)
+        if result is not None:
+            portfolio_returns_bt, _, risk_summary, _, _, _ = result
+            clean: dict = {"timestamp": datetime.now().isoformat(), "source": "backtest"}
+            for k, v in risk_summary.items():
+                if isinstance(v, (int, float, np.floating)):
+                    clean[k] = _safe_float(v)
+                elif isinstance(v, dict):
+                    clean[k] = {
+                        kk: _safe_float(vv) if isinstance(vv, (int, float, np.floating)) else vv
+                        for kk, vv in v.items()
+                    }
+                else:
+                    clean[k] = v
+            # Aliases so dashboard fields resolve correctly
+            if "var_95" not in clean:
+                clean["var_95"] = clean.get("var_95_historical")
+            if "current_drawdown" not in clean:
+                # Compute from the returns series
+                cum = (1 + portfolio_returns_bt).cumprod()
+                dd = (cum - cum.cummax()) / cum.cummax()
+                clean["current_drawdown"] = _safe_float(dd.iloc[-1]) if len(dd) > 0 else None
+            if "win_rate" not in clean:
+                n = len(portfolio_returns_bt)
+                clean["win_rate"] = float((portfolio_returns_bt > 0).sum() / n) if n > 0 else None
+            if "total_trades" not in clean:
+                clean["total_trades"] = None
+            return _json_response(clean)
 
-        _, _, risk_summary, _, _, _ = result
-        clean = {}
-        for k, v in risk_summary.items():
-            if isinstance(v, (int, float, np.floating)):
-                clean[k] = _safe_float(v)
-            elif isinstance(v, dict):
-                clean[k] = {
-                    kk: _safe_float(vv) if isinstance(vv, (int, float, np.floating)) else vv
-                    for kk, vv in v.items()
+        # Fall back: compute live risk metrics from equity history
+        equity = _load_equity_history()
+        if equity is None or len(equity) < 2:
+            return _json_response(
+                {
+                    "timestamp": datetime.now().isoformat(),
+                    "source": "live",
+                    "note": "Insufficient equity history for risk metrics (need 2+ points).",
+                    # Return zeros so dashboard shows 0 instead of dashes
+                    "sharpe_ratio": None,
+                    "sortino_ratio": None,
+                    "max_drawdown": None,
+                    "current_drawdown": None,
+                    "var_95": None,
+                    "cvar_95": None,
+                    "win_rate": None,
+                    "total_trades": None,
                 }
-            else:
-                clean[k] = v
+            )
 
-        return _json_response({"timestamp": datetime.now().isoformat(), "risk": clean})
+        try:
+            from python.data.config import RISK_FREE_RATE
+
+            rets = equity.pct_change().dropna()
+            n = len(rets)
+            # Annualisation — equity history is sparse (weekly rebalance),
+            # so use a 252-day factor but only if we have enough points.
+            # With only a few points the numbers will be noisy but better than nothing.
+            ann_factor = 252
+
+            mean_ret = float(rets.mean())
+            std_ret = float(rets.std(ddof=1)) if n > 1 else 0.0
+            rf_daily = RISK_FREE_RATE / ann_factor
+
+            sharpe = (
+                float((mean_ret - rf_daily) / std_ret * np.sqrt(ann_factor))
+                if std_ret > 0
+                else None
+            )
+
+            downside = rets[rets < 0]
+            downside_std = float(downside.std(ddof=1)) if len(downside) > 1 else 0.0
+            sortino = (
+                float((mean_ret - rf_daily) / downside_std * np.sqrt(ann_factor))
+                if downside_std > 0
+                else None
+            )
+
+            cumulative = (1 + rets).cumprod()
+            running_max = cumulative.cummax()
+            dd_series = (cumulative - running_max) / running_max
+            max_dd = float(dd_series.min())
+            current_dd = float(dd_series.iloc[-1])
+
+            sorted_rets = np.sort(rets.to_numpy(dtype=float))
+            var_idx = int(np.floor(0.05 * n))
+            var_95 = float(sorted_rets[var_idx]) if n > 0 else None
+            cvar_95 = float(sorted_rets[: var_idx + 1].mean()) if var_idx > 0 else None
+
+            win_rate = float((rets > 0).sum() / n) if n > 0 else None
+
+            return _json_response(
+                {
+                    "timestamp": datetime.now().isoformat(),
+                    "source": "live_equity_history",
+                    "n_periods": n,
+                    "note": "Computed from live equity history. Metrics are noisy with few data points.",
+                    "sharpe_ratio": sharpe,
+                    "sortino_ratio": sortino,
+                    "max_drawdown": max_dd,
+                    "current_drawdown": current_dd,
+                    "var_95": var_95,
+                    "cvar_95": cvar_95,
+                    "win_rate": win_rate,
+                    "total_trades": None,  # not tracked here
+                }
+            )
+        except Exception as exc:
+            logger.warning(f"Live risk computation failed: {exc}")
+            return _json_response({"error": f"Risk computation failed: {exc}"}, 500)
 
     # ── GET /api/drift — ML feature drift ──
     @server.route("/api/drift")
@@ -1679,23 +1771,45 @@ def register_api_routes(app: dash.Dash) -> None:
                 return _json_response(
                     {
                         "timestamp": datetime.now().isoformat(),
-                        "drift_report": None,
+                        "drift_count": 0,
+                        "total_features": 0,
+                        "drifted_features": [],
                         "message": "No drift report available. Run the ML pipeline first.",
                     }
                 )
 
             clean_report = json.loads(drift_path.read_text())
 
-            n_drifted = sum(
-                1
-                for info in clean_report.values()
-                if isinstance(info, dict) and info.get("drifted", False)
-            )
+            # Handle empty report (e.g. Bot A which doesn't run drift detection)
+            if not clean_report:
+                return _json_response(
+                    {
+                        "timestamp": datetime.now().isoformat(),
+                        "drift_count": 0,
+                        "total_features": 0,
+                        "drifted_features": [],
+                        "message": "No features monitored for drift.",
+                    }
+                )
+
+            # `drifted` stored as 0.0/1.0 float or bool — treat truthy as drifted
+            drifted_names = [
+                feat
+                for feat, info in clean_report.items()
+                if isinstance(info, dict) and bool(info.get("drifted", False))
+            ]
+            n_total = len(clean_report)
+            n_drifted = len(drifted_names)
 
             return _json_response(
                 {
                     "timestamp": datetime.now().isoformat(),
-                    "n_features": len(clean_report),
+                    # Field names expected by the Next.js dashboard
+                    "drift_count": n_drifted,
+                    "total_features": n_total,
+                    "drifted_features": drifted_names,
+                    # Raw data for completeness
+                    "n_features": n_total,
                     "n_drifted": n_drifted,
                     "features": clean_report,
                 }
@@ -1704,7 +1818,9 @@ def register_api_routes(app: dash.Dash) -> None:
             return _json_response(
                 {
                     "timestamp": datetime.now().isoformat(),
-                    "drift_report": None,
+                    "drift_count": 0,
+                    "total_features": 0,
+                    "drifted_features": [],
                     "message": "Failed to read drift report.",
                 }
             )
@@ -1751,16 +1867,24 @@ def register_api_routes(app: dash.Dash) -> None:
         )
         if tca_path.exists():
             try:
-                import json
-
                 with open(tca_path) as f:
                     report = json.load(f)
-                return _json_response({"timestamp": datetime.now().isoformat(), **report})
+                summary = report.get("summary", {})
+                # Flat aliases used by the Next.js dashboard
+                flat = {
+                    "avg_implementation_shortfall_bps": summary.get("mean_is_bps"),
+                    "avg_fill_rate": summary.get("mean_fill_rate"),
+                    "total_trades": summary.get("n_trades"),
+                }
+                return _json_response({"timestamp": datetime.now().isoformat(), **flat, **report})
             except Exception as exc:
                 return _json_response({"error": f"Failed to load TCA report: {exc}"}, 500)
         return _json_response(
             {
                 "timestamp": datetime.now().isoformat(),
+                "avg_implementation_shortfall_bps": None,
+                "avg_fill_rate": None,
+                "total_trades": 0,
                 "summary": {"n_trades": 0},
                 "by_symbol": [],
                 "recent_trades": [],

@@ -1117,6 +1117,21 @@ function DualEquityChart({
     a.date.localeCompare(b.date)
   );
 
+  // Tight Y domain — avoids chart showing 0-100k when equity sits at ~100k
+  const yDomain = React.useMemo((): [number, number] => {
+    const vals = chartData
+      .flatMap((pt) => [pt.botA, pt.botB])
+      .filter((v): v is number => v != null);
+    if (vals.length === 0) return [99_000, 101_000];
+    const lo = Math.min(...vals);
+    const hi = Math.max(...vals);
+    const spread = hi - lo;
+    // Floor spread: $200 so a flat line still has visible y-axis range
+    const minSpread = 200;
+    const pad = Math.max(spread * 0.15, minSpread / 2);
+    return [lo - pad, hi + pad];
+  }, [chartData]);
+
   return (
     <ChartContainer config={dualEquityChartConfig} className="h-72 w-full">
       <AreaChart data={chartData}>
@@ -1147,9 +1162,10 @@ function DualEquityChart({
         <YAxis
           tickLine={false}
           axisLine={false}
-          tickFormatter={(v: number) => `$${(v / 1000).toFixed(0)}k`}
+          tickFormatter={(v: number) => `$${(v / 1000).toFixed(1)}k`}
           fontSize={10}
-          width={50}
+          width={54}
+          domain={yDomain}
         />
         <ChartTooltip
           content={
@@ -1186,7 +1202,7 @@ function DualEquityChart({
 
 // ── Live Session Chart ──────────────────────────────────────────────────
 
-type SessionMode = "pnl" | "return";
+type SessionMode = "pnl" | "return" | "spread";
 
 const liveChartConfig = {
   a: { label: "Bot A", color: "hsl(160 60% 50%)" },
@@ -1210,6 +1226,15 @@ function LiveSessionChart({
         b: pt.b != null ? +(pt.b - STARTING_EQUITY).toFixed(2) : null,
       }));
     }
+    if (mode === "spread") {
+      // Spread = Bot B equity − Bot A equity (positive = B is ahead)
+      return data.map((pt) => ({
+        time: pt.time,
+        a: null as number | null,
+        b: null as number | null,
+        spread: pt.a != null && pt.b != null ? +(pt.b - pt.a).toFixed(2) : null,
+      }));
+    }
     // return % = (equity - 100K) / 100K * 100
     return data.map((pt) => ({
       time: pt.time,
@@ -1220,15 +1245,27 @@ function LiveSessionChart({
 
   // Tight Y domain — pad so tiny moves are visible
   const yDomain = React.useMemo((): [number, number] => {
-    const vals = chartData.flatMap((pt) => [pt.a, pt.b]).filter((v): v is number => v != null);
+    let vals: number[];
+    if (mode === "spread") {
+      vals = chartData.flatMap((pt) => {
+        const s = (pt as { spread?: number | null }).spread;
+        return s != null ? [s] : [];
+      });
+    } else {
+      vals = chartData.flatMap((pt) => [pt.a, pt.b]).filter((v): v is number => v != null);
+    }
     // Sensible fallback before data arrives
-    if (vals.length === 0) return mode === "pnl" ? [-100, 100] : [-0.1, 0.1];
+    if (vals.length === 0) {
+      if (mode === "pnl") return [-100, 100];
+      if (mode === "spread") return [-50, 50];
+      return [-0.1, 0.1];
+    }
     const lo = Math.min(...vals);
     const hi = Math.max(...vals);
-    const spread = hi - lo;
-    // Floor spread: $20 / 0.02% so chart isn't a totally flat line when market barely moves
-    const minSpread = mode === "pnl" ? 20 : 0.02;
-    const pad = Math.max(spread * 0.15, minSpread / 2);
+    const range = hi - lo;
+    // Floor spread: $20 / $10 spread / 0.02% so chart isn't a flat line
+    const minSpread = mode === "pnl" ? 20 : mode === "spread" ? 10 : 0.02;
+    const pad = Math.max(range * 0.15, minSpread / 2);
     return [lo - pad, hi + pad];
   }, [chartData, mode]);
 
@@ -1261,7 +1298,7 @@ function LiveSessionChart({
     <div className="space-y-3">
       {/* Toggle */}
       <div className="flex items-center gap-1 rounded-md border border-border p-0.5 w-fit">
-        {(["pnl", "return"] as SessionMode[]).map((m) => (
+        {(["pnl", "return", "spread"] as SessionMode[]).map((m) => (
           <button
             key={m}
             onClick={() => setMode(m)}
@@ -1271,29 +1308,47 @@ function LiveSessionChart({
                 : "text-muted-foreground hover:text-foreground"
             }`}
           >
-            {m === "pnl" ? "P&L Δ" : "Return %"}
+            {m === "pnl" ? "P&L Δ" : m === "return" ? "Return %" : "B−A"}
           </button>
         ))}
       </div>
 
       {/* Legend */}
       <div className="flex items-center gap-4 text-[11px] text-muted-foreground">
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block h-0.5 w-4 rounded-full" style={{ backgroundColor: "hsl(160 60% 50%)" }} />
-          Bot A
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span
-            className="inline-block h-0.5 w-4 rounded-full"
-            style={{
-              backgroundColor: "hsl(213 80% 58%)",
-              backgroundImage: "repeating-linear-gradient(90deg, hsl(213 80% 58%) 0 4px, transparent 4px 7px)",
-            }}
-          />
-          Bot B
-        </span>
+        {mode !== "spread" ? (
+          <>
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block h-0.5 w-4 rounded-full" style={{ backgroundColor: "hsl(160 60% 50%)" }} />
+              Bot A
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span
+                className="inline-block h-0.5 w-4 rounded-full"
+                style={{
+                  backgroundColor: "hsl(213 80% 58%)",
+                  backgroundImage: "repeating-linear-gradient(90deg, hsl(213 80% 58%) 0 4px, transparent 4px 7px)",
+                }}
+              />
+              Bot B
+            </span>
+          </>
+        ) : (
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block h-0.5 w-4 rounded-full" style={{ backgroundColor: "hsl(38 90% 58%)" }} />
+            Bot B − Bot A (positive = B winning)
+          </span>
+        )}
         {chartData.length > 0 && (() => {
           const last = chartData[chartData.length - 1];
+          if (mode === "spread") {
+            const s = (last as { spread?: number | null }).spread;
+            if (s == null) return null;
+            return (
+              <span className={`ml-auto tabular-nums font-medium ${s >= 0 ? "text-green-500" : "text-red-500"}`}>
+                {s >= 0 ? "+" : ""}${s.toFixed(2)}
+              </span>
+            );
+          }
           const aVal = last.a;
           const bVal = last.b;
           return (
@@ -1324,6 +1379,10 @@ function LiveSessionChart({
               <stop offset="0%" stopColor="hsl(213 80% 58%)" stopOpacity={0.18} />
               <stop offset="100%" stopColor="hsl(213 80% 58%)" stopOpacity={0} />
             </linearGradient>
+            <linearGradient id="liveGradSpread" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="hsl(38 90% 58%)" stopOpacity={0.22} />
+              <stop offset="100%" stopColor="hsl(38 90% 58%)" stopOpacity={0} />
+            </linearGradient>
           </defs>
           <XAxis
             dataKey="time"
@@ -1342,9 +1401,9 @@ function LiveSessionChart({
             domain={yDomain}
             tick={{ fill: "var(--muted-foreground)" }}
             tickFormatter={(v: number) =>
-              mode === "pnl"
-                ? `${v >= 0 ? "+" : ""}$${v.toFixed(0)}`
-                : `${v >= 0 ? "+" : ""}${v.toFixed(3)}%`
+              mode === "return"
+                ? `${v >= 0 ? "+" : ""}${v.toFixed(3)}%`
+                : `${v >= 0 ? "+" : ""}$${v.toFixed(0)}`
             }
           />
           <ReferenceLine
@@ -1358,6 +1417,13 @@ function LiveSessionChart({
               <ChartTooltipContent
                 formatter={(value, name) => {
                   const v = Number(value);
+                  if (String(name) === "spread") {
+                    return (
+                      <span className="tabular-nums">
+                        B−A: {v >= 0 ? "+" : ""}${v.toFixed(2)}
+                      </span>
+                    );
+                  }
                   const label = String(name) === "a" ? "Bot A" : "Bot B";
                   const display =
                     mode === "pnl"
@@ -1372,27 +1438,42 @@ function LiveSessionChart({
               />
             }
           />
-          <Area
-            type="monotone"
-            dataKey="a"
-            stroke="hsl(160 60% 50%)"
-            strokeWidth={1.5}
-            fill="url(#liveGradA)"
-            connectNulls
-            dot={false}
-            isAnimationActive={false}
-          />
-          <Area
-            type="monotone"
-            dataKey="b"
-            stroke="hsl(213 80% 58%)"
-            strokeWidth={1.5}
-            strokeDasharray="4 3"
-            fill="url(#liveGradB)"
-            connectNulls
-            dot={false}
-            isAnimationActive={false}
-          />
+          {mode === "spread" ? (
+            <Area
+              type="monotone"
+              dataKey="spread"
+              stroke="hsl(38 90% 58%)"
+              strokeWidth={1.5}
+              fill="url(#liveGradSpread)"
+              connectNulls
+              dot={false}
+              isAnimationActive={false}
+            />
+          ) : (
+            <>
+              <Area
+                type="monotone"
+                dataKey="a"
+                stroke="hsl(160 60% 50%)"
+                strokeWidth={1.5}
+                fill="url(#liveGradA)"
+                connectNulls
+                dot={false}
+                isAnimationActive={false}
+              />
+              <Area
+                type="monotone"
+                dataKey="b"
+                stroke="hsl(213 80% 58%)"
+                strokeWidth={1.5}
+                strokeDasharray="4 3"
+                fill="url(#liveGradB)"
+                connectNulls
+                dot={false}
+                isAnimationActive={false}
+              />
+            </>
+          )}
         </AreaChart>
       </ChartContainer>
     </div>
