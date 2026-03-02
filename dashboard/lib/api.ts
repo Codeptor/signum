@@ -39,12 +39,27 @@ export async function fetchDrift(bot: BotId) {
 }
 
 export async function fetchEquity(bot: BotId): Promise<EquityPoint[]> {
-  const data = await fetchBot<EquityPoint[] | { equity: EquityPoint[] } | { records: EquityPoint[] }>(bot, "api/equity");
+  type RawPoint = { date?: string; timestamp?: string; equity: number };
+  const data = await fetchBot<
+    RawPoint[] |
+    { history: RawPoint[] } |
+    { equity: RawPoint[] } |
+    { records: RawPoint[] }
+  >(bot, "api/equity");
   if (!data) return [];
-  if (Array.isArray(data)) return data;
-  if ("equity" in data && Array.isArray(data.equity)) return data.equity;
-  if ("records" in data && Array.isArray(data.records)) return data.records;
-  return [];
+
+  // Unwrap whichever envelope key the backend uses
+  let raw: RawPoint[] = [];
+  if (Array.isArray(data))                                    raw = data;
+  else if ("history" in data && Array.isArray(data.history)) raw = data.history;
+  else if ("equity"  in data && Array.isArray(data.equity))  raw = data.equity;
+  else if ("records" in data && Array.isArray(data.records)) raw = data.records;
+
+  // Normalize: backend sends "date", EquityPoint type expects "timestamp"
+  return raw.map((pt) => ({
+    timestamp: pt.timestamp ?? pt.date ?? "",
+    equity: pt.equity,
+  }));
 }
 
 export async function fetchHealth(bot: BotId) {
