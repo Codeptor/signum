@@ -201,6 +201,8 @@ def _liquidate_all_positions(broker: AlpacaBroker) -> int:
     submitted = []
     for pos in positions:
         try:
+            import uuid
+
             side = "sell" if pos.qty > 0 else "buy"
             qty = abs(pos.qty)
             order = BrokerOrder(
@@ -209,6 +211,10 @@ def _liquidate_all_positions(broker: AlpacaBroker) -> int:
                 qty=qty,
                 order_type="market",
                 time_in_force="day",
+                # LIQID fix: use a unique client_order_id per liquidation attempt.
+                # Deterministic IDs cause Alpaca to reject retries on the same day
+                # because it remembers cancelled order IDs.
+                client_order_id=uuid.uuid4().hex[:24],
             )
             order_id = broker.submit_order(order)
             submitted.append({"order_id": order_id, "symbol": pos.symbol, "qty": qty})
@@ -1302,6 +1308,62 @@ def main():
                             AlertSeverity.CRITICAL,
                         )
                         _liquidate_all_positions(broker)
+
+                        # --- KILLRESET fix: reset drawdown baseline after liquidation ---
+                        # Without this, the bridge equity curve still contains the old
+                        # $100K starting point, so the next loop iteration computes a
+                        # permanent >15% drawdown and re-triggers the kill switch in an
+                        # infinite loop.
+                        try:
+                            post_acct = broker.get_account()
+                            new_equity = post_acct.equity
+                            logger.info(f"KILLRESET: Post-liquidation equity: ${new_equity:,.2f}")
+
+                            # 1. Reset bridge equity curve to start fresh from current equity
+                            bridge.equity_curve.clear()
+                            bridge.equity_curve.append(
+                                {
+                                    "timestamp": datetime.now(
+                                        tz=ZoneInfo("America/New_York")
+                                    ).isoformat(),
+                                    "equity": new_equity,
+                                }
+                            )
+                            bridge.equity = new_equity
+                            bridge.cash = post_acct.cash
+
+                            # 2. Persist new equity_peak so it doesn't re-trigger on restart
+                            _save_bot_state(
+                                {
+                                    "last_shutdown": datetime.now(
+                                        tz=ZoneInfo("America/New_York")
+                                    ).isoformat(),
+                                    "last_equity": new_equity,
+                                    "equity_peak": new_equity,
+                                    "reason": "kill_switch_reset",
+                                }
+                            )
+
+                            # 3. Check for stuck positions that failed to liquidate
+                            remaining = broker.list_positions()
+                            if remaining:
+                                stuck = [f"{p.symbol}({p.qty})" for p in remaining]
+                                logger.error(
+                                    f"KILLRESET: {len(remaining)} positions STILL OPEN "
+                                    f"after liquidation: {stuck}. Manual intervention needed."
+                                )
+                                _send_alert(
+                                    f"Kill switch: {len(remaining)} positions stuck after "
+                                    f"liquidation: {stuck}",
+                                    AlertSeverity.CRITICAL,
+                                )
+                            else:
+                                logger.info(
+                                    "KILLRESET: All positions liquidated. Drawdown baseline reset."
+                                )
+                        except Exception as e:
+                            logger.error(f"KILLRESET: Failed to reset baseline: {e}")
+
                         time.sleep(60 * 30)
                         continue
 

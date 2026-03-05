@@ -106,19 +106,25 @@ class AlpacaBroker(BaseBroker):
         return True
 
     @staticmethod
-    def _make_client_order_id(order: BrokerOrder) -> str:
-        """Generate a deterministic client_order_id to prevent duplicate orders.
+    def _make_client_order_id(order: BrokerOrder, unique: bool = False) -> str:
+        """Generate a client_order_id.
 
-        Uses symbol + side + qty + order_type + date so that an identical order
-        submitted on the same trading day is idempotent. Day-level granularity
-        prevents minute-boundary races (C5 fix) where a retry at :00 would
-        generate a different ID than the original at :59.
+        By default, deterministic (symbol + side + qty + type + date) so that
+        an identical order submitted on the same trading day is idempotent.
+        Day-level granularity prevents minute-boundary races (C5 fix).
+
+        When ``unique=True`` a UUID4 nonce is appended so every call produces
+        a distinct ID.  Use this for liquidation retries where Alpaca rejects
+        reuse of a cancelled order's client_order_id (LIQID fix).
         """
+        import uuid
         from datetime import datetime, timezone
 
         # H-IDTZ fix: use UTC date so client_order_id matches _has_traded_today's UTC
         day_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         raw = f"{order.symbol}|{order.side}|{order.qty}|{order.order_type}|{day_str}"
+        if unique:
+            raw += f"|{uuid.uuid4().hex}"
         return hashlib.sha256(raw.encode()).hexdigest()[:24]
 
     def disconnect(self) -> None:
