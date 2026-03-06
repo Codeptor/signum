@@ -34,7 +34,7 @@ class CrossSectionalModel:
                 "metric": "huber",
                 "learning_rate": 0.05,
                 "num_leaves": 31,
-                "min_child_samples": 250,
+                "min_child_samples": 50,
                 "subsample": 0.7,
                 "colsample_bytree": 0.7,
                 "verbose": -1,
